@@ -152,9 +152,9 @@ void ensure_csv_exists() {
         f = fopen("patients.csv", "w");
         if (f) {
             fprintf(f, "\"PatientName\",\"PatientID\",\"BirthDate\",\"Sex\",\"ReqPhys\",\"ReqSvc\",\"ProcDesc\",\"Reason\",\"Accession\",\"ProcID\",\"Priority\",\"StationAE\",\"StartDate\",\"StartTime\",\"PerfPhys\",\"SPSDesc\",\"SPSID\",\"StationName\",\"Location\",\"Status\",\"Modality\",\"RefPhys\",\"StudyDesc\"\n");
-            fprintf(f, "\"DOE^JOHN\",\"P001\",\"19800101\",\"M\",\"SMITH^DR\",\"RAD\",\"CT Head\",\"Headache\",\"ACC001\",\"PROC001\",\"1\",\"%s\",\"20260706\",\"120000\",\"JONES^DR\",\"CT Head w/o\",\"SPS001\",\"CT01\",\"Room 1\",\"SCHEDULED\",\"CT\",\"WILSON^DR\",\"Routine\"\n", cfg.aetitle);
+            fprintf(f, "\"DOE^JOHN\",\"P001\",\"19800101\",\"M\",\"SMITH^DR\",\"RAD\",\"CT Head\",\"Headache\",\"ACC001\",\"PROC001\",\"1\",\"%s\",\"20260706\",\"12:00\",\"JONES^DR\",\"CT Head w/o\",\"SPS001\",\"CT01\",\"Room 1\",\"SCHEDULED\",\"CT\",\"WILSON^DR\",\"Routine\"\n", cfg.aetitle);
             fclose(f);
-            write_log("Created sample patients.csv");
+            write_log("Created sample patients.csv with HH:MM time format");
         }
     } else {
         fclose(f);
