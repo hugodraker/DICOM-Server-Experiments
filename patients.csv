@@ -1,0 +1,2 @@
+PatientName,PatientID,BirthDate,Sex,ReqPhys,ReqSvc,ProcDesc,Reason,Accession,ProcID,Priority,StationAE,StartDate,StartTime,PerfPhys,SPSDesc,SPSID,StationName,Location,Status,Modality,RefPhys,StudyDesc,ProtoCode,ProtoScheme,ProtoMeaning,StudyUID
+smith^john^a.,P12345679,19800101,M,Dr. Smith,XR,2 View Chest X-Ray,Routine,ACC00001,PROC1,2,RIS,20260708,080000,Dr. Jones,SPS1,SPSID1,,,1,CR,Dr. Adams,Chest Study,PCODE1,99XXX,Chest Protocol,1.2.840.113619.2.1.9999.1
