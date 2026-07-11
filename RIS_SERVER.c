@@ -1,6 +1,12 @@
 /* ============================================================================
  * RIS Multi-Protocol Server (DICOM + Telnet + HTTP)
- * Compile: gcc -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
+ *
+ * THIS WORK IS NOT FIT FOR ANY FUNCTION OR PURPOSE, COMES WITH NO WARRANTY,
+ * AND IS BEING RELEASED INTO THE PUBLIC DOMAIN.
+ *
+ * Compile:
+ *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
+ *   tcc -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
  * ============================================================================ */
 
 #define WIN32_LEAN_AND_MEAN
@@ -67,7 +73,12 @@ static char   g_dispParam[512];
 
 NOTIFYICONDATA nid;
 
-static const char *szCSVFile = "patients.csv", *szCSVTempFile = "patients.tmp";
+/* In-memory CSV store — no file I/O for patient data */
+#define MAX_CSV_ROWS 1024
+static char g_csvData[MAX_CSV_ROWS][LINE_SIZE];
+static int  g_csvRows = 0;
+static int  g_csvInitialized = 0;
+
 static const char *szIniServer = "Server", *szIniAET = "AETitle", *szIniTelnetPort = "TelnetPort";
 static const char *szIniHttpPort = "HttpPort", *szIniDicomPort = "DicomPort";
 static const char *szIniTelnetTimeout = "TelnetTimeout", *szIniDebugLog = "DebugLog";
@@ -98,10 +109,14 @@ static const char *szFakePatient = "DOE^JOHN,P12345678,19800101,M,Dr. Smith,XR,2
 
 static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title><style>"
 "table{border-collapse:collapse;width:100%;font-size:14px;}th,td{border:1px solid #dddddd;padding:12px;}th{background:#009879;color:#fff;text-align:left;}"
-"tr{border-bottom:1px solid #ddd;}tr:nth-child(even){background:#f3f3f3;}input,select{margin:5px;padding:5px;}div.query-box{margin:20px;padding:10px;background:#f9f9f9;border-radius:5px;}div.form-row{display:inline-block;margin-right:15px;}</style>"
+"tr{border-bottom:1px solid #ddd;}tr:nth-child(even){background:#f3f3f3;}input,select{margin:5px;padding:5px;}div.query-box{margin:20px;padding:10px;background:#f9f9f9;border-radius:5px;}div.form-row{display:inline-block;margin-right:15px;}"
+".top-btn { min-width: 140px; height: 36px; padding: 0 15px; box-sizing: border-box; text-align: center; border: none; cursor: pointer; color: white; display: inline-block; font-size: 14px; margin: 0; line-height: 36px; border-radius: 4px; text-decoration: none; }"
+".bg-green { background: #4CAF50; } .bg-blue { background: #2196F3; } .bg-red { background: #f44336; }"
+"</style>"
 "<script>var fnames=['PatientName','PatientID','BirthDate','Sex','ReqPhys','ReqSvc','ProcDesc','Reason','Accession','ProcID','Priority','StationAE','StartDate','StartTime','PerfPhys','SPSDesc','SPSID','StationName','Location','Status','Modality','RefPhys','StudyDesc','ProtoCode','ProtoScheme','ProtoMeaning','StudyUID'];"
 "function f(r){var c=r.cells;for(var i=0;i<c.length&&i<fnames.length;i++){var e=document.getElementsByName(fnames[i])[0];if(e)e.value=(c[i].innerText||c[i].textContent).trim();}}"
-"function sendMan(){var c=[];for(var i=0;i<fnames.length;i++){var v=document.getElementsByName(fnames[i])[0]?document.getElementsByName(fnames[i])[0].value:'';if(v.indexOf(',')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}fetch('/manual',{method:'POST',body:c.join(',')}).then(function(){window.location.href='/';});return false;}"
+"function sendMan(){var a=document.getElementsByName('Accession')[0].value.trim();if(!a){alert('Accession number is required!');return false;}var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}fetch('/manual',{method:'POST',body:c.join(',')}).then(function(){window.location.href='/';});return false;}"
+"function delP(){var a=document.getElementsByName('Accession')[0].value;if(a&&confirm('Delete Patient '+a+'?'))fetch('/delpat',{method:'POST',body:a}).then(function(){window.location.href='/';});}"
 "function sortTable(n){var t,r,sw,i,x,y,sd,d;t=document.getElementById('pTable');sw=true;d='asc';while(sw){sw=false;r=t.rows;for(i=1;i<(r.length-1);i++){sd=false;x=r[i].getElementsByTagName('TD')[n];y=r[i+1].getElementsByTagName('TD')[n];if(d=='asc'){if(x.innerHTML.toLowerCase()>y.innerHTML.toLowerCase()){sd=true;break;}}else{if(x.innerHTML.toLowerCase()<y.innerHTML.toLowerCase()){sd=true;break;}}}if(sd){r[i].parentNode.insertBefore(r[i+1],r[i]);sw=true;}}}"
 "function formatDates(){var t=document.getElementById('pTable');if(!t)return;for(var i=1;i<t.rows.length;i++){var c=t.rows[i].cells;if(c.length>13){"
 "var b=c[2].innerText;if(b.length===8)c[2].innerText=b.substr(0,4)+'-'+b.substr(4,2)+'-'+b.substr(6,2);"
@@ -109,12 +124,21 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 "var tm=c[13].innerText;if(tm.length===6)c[13].innerText=tm.substr(0,2)+':'+tm.substr(2,2);"
 "}}}"
 "function nxtA(){var t=document.getElementById('pTable'),m=0,p='ACC',c=5;if(t){for(var i=1;i<t.rows.length;i++){var v=t.rows[i].cells[8].innerText||'',mt=v.match(/([^0-9]*)([0-9]+)/);if(mt){p=mt[1];var val=parseInt(mt[2],10);if(val>m){m=val;c=mt[2].length;}}}}m++;document.getElementsByName('Accession')[0].value=p+String(m).padStart(c,'0');}"
-"window.onload=function(){var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd&&!sd.value)sd.value=y+'-'+mo+'-'+da;};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
-
+"function newPatient(){for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}}"
+"window.onload=function(){newPatient();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
 static const char *szHtmlEnd = "</body></html>";
 
-static const char *szHtmlForms1 = "<div class='form-row'><form action='/upload' method='POST' enctype='multipart/form-data'><input type='file' name='csvfile'> <input type='submit' value='Upload CSV'></form></div>"
-"<div class='form-row'><form action='/delete' method='POST' style='display:inline;'><input type='submit' value='Delete All Data' style='color:red;'></form></div><hr>"
+static const char *szHtmlForms1 = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
+"<button type='button' onclick='newPatient()' class='top-btn bg-green'>New Patient</button>"
+"<form action='/upload' method='POST' enctype='multipart/form-data' style='display:inline-flex; align-items:center; gap:10px; margin:0;'>"
+"<input type='file' name='csvfile' id='csvfile' style='display:none;' onchange='document.getElementById(\"fileName\").innerText=this.files[0]?this.files[0].name:\"No file chosen\";'>"
+"<label for='csvfile' class='top-btn bg-blue'>Choose File</label>"
+"<span id='fileName' style='color:#666; font-size:14px; width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;'>No file chosen</span>"
+"<input type='submit' value='Upload CSV' class='top-btn bg-green'>"
+"</form>"
+"<form action='/delete' method='POST' style='margin:0;'>"
+"<input type='submit' value='Delete All Data' class='top-btn bg-red'>"
+"</form></div><hr>"
 "<form id='manForm' onsubmit='return sendMan()'>"
 "<input type='text' name='PatientName' placeholder='Patient Name'> <input type='text' name='PatientID' placeholder='Patient ID'> Birth: <input type='date' name='BirthDate'> <select name='Sex'><option value=''>Sex</option><option value='M'>M</option><option value='F'>F</option><option value='O'>O</option></select><br>"
 "<input type='text' name='ReqPhys' placeholder='Req Phys'> <input type='text' name='ReqSvc' placeholder='Req Svc'> <input type='text' name='ProcDesc' placeholder='Proc Desc'> <input type='text' name='Reason' placeholder='Reason'><br>"
@@ -126,7 +150,10 @@ static const char *szHtmlForms2 = " <select name='Status'><option value='0'>NONE
 "<input type='text' name='Modality' placeholder='Modality'> <input type='text' name='RefPhys' placeholder='Ref Phys'> <input type='text' name='StudyDesc' placeholder='Study Desc'><br>"
 "<input type='text' name='ProtoCode' placeholder='Proto Code'> <input type='text' name='ProtoScheme' placeholder='Proto Scheme'> <input type='text' name='ProtoMeaning' placeholder='Proto Meaning'><br>"
 "<input type='text' name='StudyUID' placeholder='Study UID' style='width:300px;'><br>"
-"<input type='submit' value='Add/Edit Patient'> <button type='button' onclick='nxtA()'>Next Accession</button></form><hr>";
+"<div style='margin-top:15px; display:flex; gap:10px;'>"
+"<input type='submit' value='Add/Edit Patient' class='top-btn bg-green'> "
+"<button type='button' onclick='nxtA()' class='top-btn bg-blue'>Next Accession</button> "
+"<button type='button' onclick='delP()' class='top-btn bg-red'>Delete Patient</button></div></form><hr>";
 
 typedef struct {
     char patientName[65], patientID[65], dob[17], sex[17];
@@ -154,6 +181,8 @@ static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead);
 static void parse_csv_line_mwl(char *line, MWLEntry *e);
 static void trim_mwl(char *str);
 static bool dicom_add_string(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, const char* s);
+static int ParseCSVLineToEntry(const char *pLine, char *pEntry);
+static void BuildCSVLineFromEntry(char *pEntry, char *pOut);
 
 static uint8_t g_findCmd[8192];
 static int     g_findCmdLen = 0;
@@ -338,14 +367,30 @@ static void BuildCSVLineFromEntry(char *pEntry, char *pOut) {
     *pCur = '\0';
 }
 
-static void CreateCSVIfMissing(void) {
-    FILE *f = fopen(szCSVFile, "r");
-    if (f) { fclose(f); return; }
-    f = fopen(szCSVFile, "w");
-    if (!f) return;
-    fprintf(f, "%s\r\n", szCSVHeader);
-    fprintf(f, "%s\r\n", szFakePatient);
-    fclose(f);
+static void EnsureCsvInitialized(void) {
+    if (g_csvInitialized) return;
+    g_csvInitialized = 1;
+    strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1); g_csvData[0][LINE_SIZE - 1] = '\0';
+    
+    // Parse the fake patient and inject the live system date
+    char entry[ENTRY_SIZE];
+    ParseCSVLineToEntry(szFakePatient, entry);
+    
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char today[16];
+    snprintf(today, sizeof(today), "%04d%02d%02d", st.wYear, st.wMonth, st.wDay);
+    
+    // Index 12 is the StartDate field
+    strncpy(GetFieldPtr(entry, 12), today, FIELD_SIZE - 1);
+    
+    char fakePat[LINE_SIZE];
+    BuildCSVLineFromEntry(entry, fakePat);
+    
+    strncpy(g_csvData[1], fakePat, LINE_SIZE - 1);
+    g_csvData[1][LINE_SIZE - 1] = '\0';
+    
+    g_csvRows = 2;
 }
 
 static int AccessionEquals(const char *pLine, const char *pAccession) {
@@ -355,24 +400,22 @@ static int AccessionEquals(const char *pLine, const char *pAccession) {
 }
 
 static int UpdateCsvByPatient(char *pEntry, const char *pLineOut) {
-    int found = 0;
-    CreateCSVIfMissing();
+    EnsureCsvInitialized();
     char *pAcc = GetFieldPtr(pEntry, 8);
     EnterCriticalSection(&g_csvLock);
-    FILE *hIn = fopen(szCSVFile, "r");
-    FILE *hOut = fopen(szCSVTempFile, "w");
-    if (!hOut) { if (hIn) fclose(hIn); LeaveCriticalSection(&g_csvLock); return 0; }
-    if (!hIn || !fgets(g_fileLine, LINE_SIZE, hIn)) { fprintf(hOut, "%s\r\n", szCSVHeader); if (hIn) goto UCP_ReadLoop_; goto UCP_Insert; }
-    fputs(g_fileLine, hOut);
-UCP_ReadLoop_:
-    while (fgets(g_fileLine, LINE_SIZE, hIn)) {
-        if (!found && AccessionEquals(g_fileLine, pAcc)) { fprintf(hOut, "%s\r\n", pLineOut); found = 1; }
-        else fputs(g_fileLine, hOut);
+    int found = 0;
+    for (int i = 1; i < g_csvRows; i++) {
+        if (AccessionEquals(g_csvData[i], pAcc)) {
+            strncpy(g_csvData[i], pLineOut, LINE_SIZE - 1);
+            g_csvData[i][LINE_SIZE - 1] = '\0';
+            found = 1; break;
+        }
     }
-    if (hIn) fclose(hIn);
-UCP_Insert:
-    if (!found) fprintf(hOut, "%s\r\n", pLineOut);
-    fclose(hOut); remove(szCSVFile); rename(szCSVTempFile, szCSVFile);
+    if (!found && g_csvRows < MAX_CSV_ROWS) {
+        strncpy(g_csvData[g_csvRows], pLineOut, LINE_SIZE - 1);
+        g_csvData[g_csvRows][LINE_SIZE - 1] = '\0';
+        g_csvRows++;
+    }
     LeaveCriticalSection(&g_csvLock);
     return found;
 }
@@ -585,13 +628,11 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
     dicom_get_string(req_buf, req_len, 0x0040, 0x0002, qDate);
     dicom_get_string(req_buf, req_len, 0x0040, 0x0003, qTime); // Fixed Time extraction
 
-    CreateCSVIfMissing();
-    FILE *f = fopen(szCSVFile, "r");
-    if (f) {
-        char line[MAX_CSV_LINE]; int row = 0;
-        while (fgets(line, sizeof(line), f)) {
-            if (row++ == 0) continue;
-            MWLEntry e; parse_csv_line_mwl(line, &e);
+    EnsureCsvInitialized();
+    {
+        int row;
+        for (row = 1; row < g_csvRows; row++) {
+            MWLEntry e; parse_csv_line_mwl(g_csvData[row], &e);
             
             // Apply DICOM Filters
             if (qMod[0] != '\0' && strcmp(qMod, e.modality) != 0) continue;
@@ -637,9 +678,11 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             uint8_t data_buf[4096]; int data_len = 0;
             
             // --- ROOT LEVEL TAGS (Must be strictly ascending) ---
+// --- ROOT LEVEL TAGS (Must be strictly ascending) ---
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0050, e.accNum);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0090, e.refPhys);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0010, e.patientName);
+            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0020, e.patientID); 
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0030, e.dob);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0020, 0x000D, e.studyUID);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0032, 0x1060, e.procDesc);
@@ -673,7 +716,6 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
 
             send_pdata_tf(clientSocket, pc_id, 0x02, data_buf, data_len);
         }
-        fclose(f);
     }
     
     // Send C-FIND Success Response
@@ -863,12 +905,15 @@ static int LineMatchesDisp(const char *pLine, const char *pParam) {
 static void ProcessDispCommand(int clientIdx, const char *pLine) {
     ExtractDispParam(pLine, g_dispParam);
     write_log("DISP query received");
-    FILE *f = fopen(szCSVFile, "r");
-    if (!f) { SendText(g_clients[clientIdx], "NO DATA\r\n"); return; }
-    fgets(g_fileLine, LINE_SIZE, f);
+    EnsureCsvInitialized();
     int count = 0;
-    while (fgets(g_fileLine, LINE_SIZE, f)) { if (LineMatchesDisp(g_fileLine, g_dispParam)) { SendText(g_clients[clientIdx], g_fileLine); count++; } }
-    fclose(f);
+    for (int i = 1; i < g_csvRows; i++) {
+        if (LineMatchesDisp(g_csvData[i], g_dispParam)) {
+            SendText(g_clients[clientIdx], g_csvData[i]);
+            SendText(g_clients[clientIdx], "\r\n");
+            count++;
+        }
+    }
     char resp[64]; snprintf(resp, sizeof(resp), "%d RESULTS\r\n", count);
     SendText(g_clients[clientIdx], resp);
 }
@@ -907,10 +952,10 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
     
     if (pBuf[0] == 'G') {
         SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
-        FILE *hf = fopen(szCSVFile, "r");
-        if (hf) { int isHeader = 1; SendText(sock, "<table id='pTable'>");
-            while (fgets(g_fileLine, LINE_SIZE, hf)) {
-                char entry[ENTRY_SIZE]; ParseCSVLineToEntry(g_fileLine, entry);
+        EnsureCsvInitialized();
+        { int isHeader = 1; SendText(sock, "<table id='pTable'>");
+            for (int ri = 0; ri < g_csvRows; ri++) {
+                char entry[ENTRY_SIZE]; ParseCSVLineToEntry(g_csvData[ri], entry);
                 SendText(sock, isHeader ? "<tr>" : "<tr onclick='f(this)' style='cursor:pointer;'>");
                 for (int fi = 0; fi < FIELD_COUNT; fi++) {
                     SendText(sock, isHeader ? "<th onclick='sortTable(this.cellIndex)'>" : "<td>");
@@ -918,9 +963,9 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 }
                 SendText(sock, "</tr>"); isHeader = 0;
             }
-            SendText(sock, "</table><script>formatDates();</script>"); fclose(hf);
+            SendText(sock, "</table><script>formatDates();</script>");
         }
-        
+
         SendText(sock, szHtmlForms1);
         FILE *fr = fopen("rooms.csv", "r");
         if (fr) {
@@ -974,15 +1019,44 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
     if (pBuf[0] == 'P') {
         char *body = strstr(pBuf, "\r\n\r\n"); if (!body) { RemoveClient(clientIdx); return; }
         body += 4;
-        if (strstr(pBuf, "POST /delete")) { 
-            FILE *hf = fopen(szCSVFile, "w"); 
-            if (hf) { 
-                fprintf(hf, "%s\r\n", szCSVHeader); 
-                fclose(hf); 
-            } 
+        
+        /* Wait for the entire payload to arrive before processing */
+        char *clPtr = strstr(pBuf, "Content-Length:");
+        if (clPtr && (int)strlen(body) < atoi(clPtr + 15)) return;
+        
+        if (strstr(pBuf, "POST /delete")) {
+            EnterCriticalSection(&g_csvLock);
+            strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1);
+            g_csvData[0][LINE_SIZE - 1] = '\0';
+            g_csvRows = 1;
+            LeaveCriticalSection(&g_csvLock);
         }
-        else if (strstr(pBuf, "POST /manual")) {
+        else if (strstr(pBuf, "POST /delpat")) {
             if (!body[0]) { RemoveClient(clientIdx); return; }
+            char acc[64];
+            strncpy(acc, body, 63); acc[63] = '\0';
+            TrimInPlace(acc);
+            EnterCriticalSection(&g_csvLock);
+            for (int i = 1; i < g_csvRows; i++) {
+                if (AccessionEquals(g_csvData[i], acc)) {
+                    for (int j = i; j < g_csvRows - 1; j++) {
+                        strncpy(g_csvData[j], g_csvData[j+1], LINE_SIZE - 1);
+                    }
+                    g_csvRows--;
+                    break;
+                }
+            }
+            LeaveCriticalSection(&g_csvLock);
+        }
+else if (strstr(pBuf, "POST /manual")) {
+            if (!body[0]) { RemoveClient(clientIdx); return; }
+            
+            // Strip trailing HTTP carriage returns/newlines from the body payload
+            int blen = (int)strlen(body);
+            while (blen > 0 && (body[blen-1] == '\r' || body[blen-1] == '\n' || body[blen-1] == ' ')) {
+                body[--blen] = '\0';
+            }
+
             char entry[ENTRY_SIZE]; memset(entry, 0, ENTRY_SIZE); ParseCSVLineToEntry(body, entry);
             if (ValidateEntry(entry)) { 
                 StripDashes(GetFieldPtr(entry, 2)); 
@@ -993,7 +1067,8 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 BuildCSVLineFromEntry(entry, g_lineOut); 
                 UpdateCsvByPatient(entry, g_lineOut); 
             }
-        } else if (strstr(pBuf, "POST /upload")) {
+        }
+ else if (strstr(pBuf, "POST /upload")) {
             char *csvStart = strstr(pBuf, szCSVHeader);
             if (csvStart) { char *si = csvStart; while (*si && *si != '\n') si++; if (*si) si++;
                 while (*si) { if (*si == '-') break; if (*si == '\r' || *si == '\n') { si++; continue; }
@@ -1199,7 +1274,7 @@ int main(int argc, char *argv[]) {
     ResolveIniPath(); printf("%s", szStartup); LoadConfig();
     printf(szConfigFmt, g_aeCalled, g_TelnetPort, g_HttpPort, g_DicomPort, g_TelnetTimeout, g_DebugLog);
     
-    InitializeCriticalSection(&g_csvLock); InitArrays(); WSAStartup(MAKEWORD(2, 2), &wsaData); CreateCSVIfMissing(); CreateTray(); ServerStart();
+    InitializeCriticalSection(&g_csvLock); InitArrays(); WSAStartup(MAKEWORD(2, 2), &wsaData); EnsureCsvInitialized(); CreateTray(); ServerStart();
     
     hDicomThread = CreateThread(NULL, 0, DicomThread, NULL, 0, NULL); if (hDicomThread) CloseHandle(hDicomThread);
     
