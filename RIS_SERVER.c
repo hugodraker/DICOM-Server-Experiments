@@ -27,6 +27,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "kernel32.lib")
 
+#define ID_OK IDOK
 #define MAX_CLIENTS          32
 #define RECV_SIZE           2048
 #define CLIENT_BUF_SIZE     8192
@@ -40,9 +41,19 @@
 #define DEFAULT_TIMEOUT_MS  10000
 #define FIONBIO_VAL         0x8004667E
 #define WM_TRAYICON         (WM_USER + 1)
+#define WM_SETTINGS         (WM_USER + 2)
 #define ID_TRAY_TOGGLE      1000
 #define ID_TRAY_SHOW        1001
 #define ID_TRAY_EXIT        1002
+#define ID_TRAY_SETTINGS    1003
+#define ID_BTN_STARTSTOP    1010
+#define ID_EDT_AET          1011
+#define ID_EDT_TELNET       1012
+#define ID_EDT_HTTP         1013
+#define ID_EDT_DICOM        1014
+#define ID_EDT_TIMEOUT      1015
+#define ID_CHK_DEBUG        1016
+#define ID_TXT_STATUS       1017
 
 /* ===== Global Variables ===== */
 static int g_TelnetPort = 23, g_HttpPort = 80, g_DicomPort = 104;
@@ -50,10 +61,12 @@ static int g_TelnetTimeout = 10, g_DebugLog = 1, g_bRunning = 0, g_bExitApp = 0;
 static SOCKET g_listenSocket = INVALID_SOCKET, g_listenSocketHttp = INVALID_SOCKET, g_listenSocketDicom = INVALID_SOCKET;
 static HINSTANCE g_hInstance = NULL;
 static HWND g_hMainWnd = NULL;
+static HWND g_hSettingsDlg = NULL;
 static HMENU g_hMenu = NULL;
 static char g_aeCalled[17] = "AUTOIT_SCP";
 static char szIniFile[MAX_PATH];
 static CRITICAL_SECTION g_csvLock;
+static CRITICAL_SECTION g_procCodesLock;
 
 static SOCKET g_clients[MAX_CLIENTS];
 static int    g_clientIDs[MAX_CLIENTS];
@@ -79,6 +92,48 @@ static char g_csvData[MAX_CSV_ROWS][LINE_SIZE];
 static int  g_csvRows = 0;
 static int  g_csvInitialized = 0;
 
+/* Procedure codes lookup table */
+#define MAX_PROC_CODES 256
+typedef struct {
+    char id[65];
+    char procCode[65];
+    char modality[65];
+    char name[65];
+} ProcCodeEntry;
+static ProcCodeEntry g_procCodes[MAX_PROC_CODES];
+static int g_procCodeCount = 0;
+static int g_procCodesLoaded = 0;
+
+typedef struct {
+    char patientName[65];
+    char patientID[65];
+    char dob[65];
+    char sex[65];
+    char reqPhys[65];
+    char reqSvc[65];
+    char procDesc[65];
+    char procReason[65];
+    char accNum[65];
+    char procID[65];
+    char procPri[65];
+    char aeTitle[65];
+    char spsDate[65];
+    char spsTime[65];
+    char perfPhys[65];
+    char spsDesc[65];
+    char spsID[65];
+    char station[65];
+    char loc[65];
+    char status[65];
+    char modality[65];
+    char refPhys[65];
+    char studyDesc[65];
+    char protoCode[65];
+    char protoScheme[65];
+    char protoMeaning[65];
+    char studyUID[65];
+} MWLEntry;
+
 static const char *szIniServer = "Server", *szIniAET = "AETitle", *szIniTelnetPort = "TelnetPort";
 static const char *szIniHttpPort = "HttpPort", *szIniDicomPort = "DicomPort";
 static const char *szIniTelnetTimeout = "TelnetTimeout", *szIniDebugLog = "DebugLog";
@@ -86,6 +141,7 @@ static const char *szDefAET = "AUTOIT_SCP", *szDefTelnetPort = "23", *szDefHttpP
 static const char *szDefDicomPort = "104", *szDefTelnetTimeout = "10", *szDefDebug = "1";
 static const char *szWndClass = "WorklistTrayClass", *szTrayTip = "RIS Multi-Protocol Server";
 static const char *szMenuStart = "Start Server", *szMenuStop = "Stop Server", *szMenuShow = "Show Console", *szMenuExit = "Exit";
+static const char *szMenuSettings = "Settings";
 static const char *szStartup = "RIS Server starting...\r\n";
 static const char *szConfigFmt = "Config: AET=%s TelnetPort=%u HttpPort=%u DicomPort=%u Timeout=%u DebugLog=%u\r\n";
 static const char *szListenFmt = "Telnet listening on port %u\r\n";
@@ -103,30 +159,9 @@ static const char *szUpdatedFmt = "UPDATED Accession %s\r\n";
 static const char *szConnected = "Connected to RIS Telnet Server. Waiting for data...\r\n";
 static const char *szPendingResp = "PENDING\r\n", *szInsertedResp = "INSERTED\r\n", *szUpdatedResp = "UPDATED\r\n";
 static const char *szInvalidResp = "INVALID LINE\r\n", *szServerStarted = "Server STARTED\r\n", *szServerStopped = "Server STOPPED\r\n";
-static const char *szHttp200OK = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n";
+static const char *szHttp200OK = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
 static const char *szCSVHeader = "PatientName,PatientID,BirthDate,Sex,ReqPhys,ReqSvc,ProcDesc,Reason,Accession,ProcID,Priority,StationAE,StartDate,StartTime,PerfPhys,SPSDesc,SPSID,StationName,Location,Status,Modality,RefPhys,StudyDesc,ProtoCode,ProtoScheme,ProtoMeaning,StudyUID";
-static const char *szFakePatient = "DOE^JOHN,P12345678,19800101,M,Dr. Smith,XR,2 View Chest X-Ray,Routine,ACC00001,PROC1,2,RIS,20260709,080000,Dr. Jones,SPS1,SPSID1,Station1,Room1,1,CR,Dr. Adams,Chest Study,PCODE1,99XXX,Chest Protocol,1.2.840.113619.2.1.9999.1";
-
-static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title><style>"
-"table{border-collapse:collapse;width:100%;font-size:14px;}th,td{border:1px solid #dddddd;padding:12px;}th{background:#009879;color:#fff;text-align:left;}"
-"tr{border-bottom:1px solid #ddd;}tr:nth-child(even){background:#f3f3f3;}input,select{margin:5px;padding:5px;}div.query-box{margin:20px;padding:10px;background:#f9f9f9;border-radius:5px;}div.form-row{display:inline-block;margin-right:15px;}"
-".top-btn { min-width: 140px; height: 36px; padding: 0 15px; box-sizing: border-box; text-align: center; border: none; cursor: pointer; color: white; display: inline-block; font-size: 14px; margin: 0; line-height: 36px; border-radius: 4px; text-decoration: none; }"
-".bg-green { background: #4CAF50; } .bg-blue { background: #2196F3; } .bg-red { background: #f44336; }"
-"</style>"
-"<script>var fnames=['PatientName','PatientID','BirthDate','Sex','ReqPhys','ReqSvc','ProcDesc','Reason','Accession','ProcID','Priority','StationAE','StartDate','StartTime','PerfPhys','SPSDesc','SPSID','StationName','Location','Status','Modality','RefPhys','StudyDesc','ProtoCode','ProtoScheme','ProtoMeaning','StudyUID'];"
-"function f(r){var c=r.cells;for(var i=0;i<c.length&&i<fnames.length;i++){var e=document.getElementsByName(fnames[i])[0];if(e)e.value=(c[i].innerText||c[i].textContent).trim();}}"
-"function sendMan(){var a=document.getElementsByName('Accession')[0].value.trim();if(!a){alert('Accession number is required!');return false;}var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}fetch('/manual',{method:'POST',body:c.join(',')}).then(function(){window.location.href='/';});return false;}"
-"function delP(){var a=document.getElementsByName('Accession')[0].value;if(a&&confirm('Delete Patient '+a+'?'))fetch('/delpat',{method:'POST',body:a}).then(function(){window.location.href='/';});}"
-"function sortTable(n){var t,r,sw,i,x,y,sd,d;t=document.getElementById('pTable');sw=true;d='asc';while(sw){sw=false;r=t.rows;for(i=1;i<(r.length-1);i++){sd=false;x=r[i].getElementsByTagName('TD')[n];y=r[i+1].getElementsByTagName('TD')[n];if(d=='asc'){if(x.innerHTML.toLowerCase()>y.innerHTML.toLowerCase()){sd=true;break;}}else{if(x.innerHTML.toLowerCase()<y.innerHTML.toLowerCase()){sd=true;break;}}}if(sd){r[i].parentNode.insertBefore(r[i+1],r[i]);sw=true;}}}"
-"function formatDates(){var t=document.getElementById('pTable');if(!t)return;for(var i=1;i<t.rows.length;i++){var c=t.rows[i].cells;if(c.length>13){"
-"var b=c[2].innerText;if(b.length===8)c[2].innerText=b.substr(0,4)+'-'+b.substr(4,2)+'-'+b.substr(6,2);"
-"var s=c[12].innerText;if(s.length===8)c[12].innerText=s.substr(0,4)+'-'+s.substr(4,2)+'-'+s.substr(6,2);"
-"var tm=c[13].innerText;if(tm.length===6)c[13].innerText=tm.substr(0,2)+':'+tm.substr(2,2);"
-"}}}"
-"function nxtA(){var t=document.getElementById('pTable'),m=0,p='ACC',c=5;if(t){for(var i=1;i<t.rows.length;i++){var v=t.rows[i].cells[8].innerText||'',mt=v.match(/([^0-9]*)([0-9]+)/);if(mt){p=mt[1];var val=parseInt(mt[2],10);if(val>m){m=val;c=mt[2].length;}}}}m++;document.getElementsByName('Accession')[0].value=p+String(m).padStart(c,'0');}"
-"function newPatient(){for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}}"
-"window.onload=function(){newPatient();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
-static const char *szHtmlEnd = "</body></html>";
+static const char *szFakePatient = ""; 
 
 static const char *szHtmlForms1 = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
 "<button type='button' onclick='newPatient()' class='top-btn bg-green'>New Patient</button>"
@@ -139,7 +174,7 @@ static const char *szHtmlForms1 = "<div class='form-row' style='display:flex; al
 "<form action='/delete' method='POST' style='margin:0;'>"
 "<input type='submit' value='Delete All Data' class='top-btn bg-red'>"
 "</form></div><hr>"
-"<form id='manForm' onsubmit='return sendMan()'>"
+"<form id='manForm'>"
 "<input type='text' name='PatientName' placeholder='Patient Name'> <input type='text' name='PatientID' placeholder='Patient ID'> Birth: <input type='date' name='BirthDate'> <select name='Sex'><option value=''>Sex</option><option value='M'>M</option><option value='F'>F</option><option value='O'>O</option></select><br>"
 "<input type='text' name='ReqPhys' placeholder='Req Phys'> <input type='text' name='ReqSvc' placeholder='Req Svc'> <input type='text' name='ProcDesc' placeholder='Proc Desc'> <input type='text' name='Reason' placeholder='Reason'><br>"
 "<input type='text' name='Accession' placeholder='Accession'> <input type='text' name='ProcID' placeholder='Proc ID'> <select name='Priority'><option value='0' selected>LOW</option><option value='1'>MEDIUM</option><option value='2'>ROUTINE</option><option value='3'>HIGH</option></select> <input type='text' name='StationAE' placeholder='Station AE'><br>"
@@ -151,57 +186,56 @@ static const char *szHtmlForms2 = " <select name='Status'><option value='0'>NONE
 "<input type='text' name='ProtoCode' placeholder='Proto Code'> <input type='text' name='ProtoScheme' placeholder='Proto Scheme'> <input type='text' name='ProtoMeaning' placeholder='Proto Meaning'><br>"
 "<input type='text' name='StudyUID' placeholder='Study UID' style='width:300px;'><br>"
 "<div style='margin-top:15px; display:flex; gap:10px;'>"
-"<input type='submit' value='Add/Edit Patient' class='top-btn bg-green'> "
+"<button type='button' onclick='sendMan()' class='top-btn bg-green'>Add/Edit Patient</button> "
 "<button type='button' onclick='nxtA()' class='top-btn bg-blue'>Next Accession</button> "
 "<button type='button' onclick='delP()' class='top-btn bg-red'>Delete Patient</button></div></form><hr>";
 
-typedef struct {
-    char patientName[65], patientID[65], dob[17], sex[17];
-    char reqPhys[65], reqSvc[65], procDesc[65], procReason[65];
-    char accNum[65], procID[65], procPri[17];
-    char aeTitle[17], spsDate[17], spsTime[17], perfPhys[65];
-    char spsDesc[65], spsID[65], station[65], loc[65], status[17];
-    char modality[17], refPhys[65], studyDesc[65];
-    char protoCode[65], protoScheme[65], protoMeaning[65], studyUID[65];
-} MWLEntry;
+static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title><style>"
+"table{border-collapse:collapse;width:100%;font-size:14px;}th,td{border:1px solid #dddddd;padding:12px;}th{background:#009879;color:#fff;text-align:left;}"
+"tr{border-bottom:1px solid #ddd;}tr:nth-child(even){background:#f3f3f3;}input,select{margin:5px;padding:5px;}div.query-box{margin:20px;padding:10px;background:#f9f9f9;border-radius:5px;}div.form-row{display:inline-block;margin-right:15px;}"
+".top-btn { min-width: 140px; height: 36px; padding: 0 15px; box-sizing: border-box; text-align: center; border: none; cursor: pointer; color: white; display: inline-block; font-size: 14px; margin: 0; line-height: 36px; border-radius: 4px; text-decoration: none; }"
+".bg-green { background: #4CAF50; } .bg-blue { background: #2196F3; } .bg-red { background: #f44336; }"
+"</style>"
+"<script>var fnames=['PatientName','PatientID','BirthDate','Sex','ReqPhys','ReqSvc','ProcDesc','Reason','Accession','ProcID','Priority','StationAE','StartDate','StartTime','PerfPhys','SPSDesc','SPSID','StationName','Location','Status','Modality','RefPhys','StudyDesc','ProtoCode','ProtoScheme','ProtoMeaning','StudyUID'];"
+"function f(r){var c=r.cells;for(var i=0;i<c.length&&i<fnames.length;i++){var e=document.getElementsByName(fnames[i])[0];if(e)e.value=(c[i].innerText||c[i].textContent).trim();}"
+"var sel=document.getElementById('procCodeSel');if(sel){var pid=document.getElementsByName('ProcID')[0].value;sel.value='';for(var j=0;j<sel.options.length;j++){if(sel.options[j].getAttribute('data-id')===pid){sel.selectedIndex=j;break;}}}}"
+"function sendMan(){var a=document.getElementsByName('Accession')[0].value.trim();if(!a){alert('Accession number is required!');return false;}var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}fetch('/manual',{method:'POST',body:c.join(',')}).then(function(){window.location.href='/';});return false;}"
+"function delP(){var a=document.getElementsByName('Accession')[0].value;if(a&&confirm('Delete Patient '+a+'?'))fetch('/delpat',{method:'POST',body:a}).then(function(){window.location.href='/';});}"
+"function sortTable(n){var t,r,sw,i,x,y,sd,d;t=document.getElementById('pTable');sw=true;d='asc';while(sw){sw=false;r=t.rows;for(i=1;i<(r.length-1);i++){sd=false;x=r[i].getElementsByTagName('TD')[n];y=r[i+1].getElementsByTagName('TD')[n];if(d=='asc'){if(x.innerHTML.toLowerCase()>y.innerHTML.toLowerCase()){sd=true;break;}}else{if(x.innerHTML.toLowerCase()<y.innerHTML.toLowerCase()){sd=true;break;}}}if(sd){r[i].parentNode.insertBefore(r[i+1],r[i]);sw=true;}}}"
+"function formatDates(){var t=document.getElementById('pTable');if(!t)return;for(var i=1;i<t.rows.length;i++){var c=t.rows[i].cells;if(c.length>13){"
+"var b=c[2].innerText;if(b.length===8)c[2].innerText=b.substr(0,4)+'-'+b.substr(4,2)+'-'+b.substr(6,2);"
+"var s=c[12].innerText;if(s.length===8)c[12].innerText=s.substr(0,4)+'-'+s.substr(4,2)+'-'+s.substr(6,2);"
+"var tm=c[13].innerText;if(tm.length===6)c[13].innerText=tm.substr(0,2)+':'+tm.substr(2,2);"
+"}}}"
+"function nxtA(){var t=document.getElementById('pTable'),m=0,p='ACC',c=5;if(t){for(var i=1;i<t.rows.length;i++){var v=t.rows[i].cells[8].innerText||'',mt=v.match(/([^0-9]*)([0-9]+)/);if(mt){p=mt[1];var val=parseInt(mt[2],10);if(val>m){m=val;c=mt[2].length;}}}}m++;document.getElementsByName('Accession')[0].value=p+String(m).padStart(c,'0');}"
+"function newPatient(){for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}var stat=document.getElementsByName('Status')[0];if(stat)stat.value='1';}"
+"function loadProcCode(){var sel=document.getElementById('procCodeSel');if(sel&&sel.selectedIndex>0){"
+"var opt=sel.options[sel.selectedIndex];"
+"var id=document.getElementsByName('ProcID')[0];var code=document.getElementsByName('SPSID')[0];var mod=document.getElementsByName('Modality')[0];var desc=document.getElementsByName('ProcDesc')[0];"
+"if(id&&code&&mod&&desc){id.value=opt.getAttribute('data-id');code.value=opt.getAttribute('data-code');mod.value=opt.getAttribute('data-mod');desc.value=opt.text;}}"
+"}"
+"window.onload=function(){newPatient();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
 
-/* Forward Declarations */
-static void RemoveClient(int idx);
-static int  IsDateRangeParam(const char *pParam);
-static void ProcessHttpClient(int clientIdx, char *pBuf);
-static void StripDashes(char *pStr);
-static void StripColons(char *pStr);
-static void FormatPatientName(char *pName);
-static void SendText(SOCKET sock, const char *pText);
-static void write_log(const char *msg);
-static void handle_association_rq(SOCKET clientSocket, char* buffer, int bytesRead);
-static void handle_c_echo_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id);
-static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id, const uint8_t *req_buf, int req_len);
-static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead);
-static void parse_csv_line_mwl(char *line, MWLEntry *e);
-static void trim_mwl(char *str);
-static bool dicom_add_string(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, const char* s);
-static int ParseCSVLineToEntry(const char *pLine, char *pEntry);
-static void BuildCSVLineFromEntry(char *pEntry, char *pOut);
-
-static uint8_t g_findCmd[8192];
-static int     g_findCmdLen = 0;
-static uint8_t g_findData[8192];
-static int     g_findDataLen = 0;
-static uint8_t g_findPcId = 0;
-static uint16_t g_findMsgId = 0;
-static uint16_t g_findCommand = 0;
+static const char *szHtmlEnd = "</body></html>";
 
 /* ===== Logging ===== */
 static void write_log(const char *msg) {
-    if (!g_DebugLog) return;
     SYSTEMTIME st;
     GetLocalTime(&st);
+    FILE *fp = fopen("ris_server.log", "a");
+    if (fp) {
+        fprintf(fp, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+        fclose(fp);
+    }
     printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+    fflush(stdout);
 }
 
 /* ===== Helpers ===== */
+static void RemoveClient(int idx);
+
 static char *GetFieldPtr(char *pEntry, int fieldIdx) { return pEntry + (fieldIdx * FIELD_SIZE); }
 static char *GetClientBufferPtr(int idx) { return g_clientBuffers + (idx * CLIENT_BUF_SIZE); }
 static char *GetPendingEntryPtr(int idx) { return g_pendingEntries + (idx * ENTRY_SIZE); }
@@ -226,10 +260,9 @@ static void StripColons(char *pStr) {
     char *dst = pStr; char *orig = pStr;
     while (*pStr) { if (*pStr != ':') *dst++ = *pStr; pStr++; }
     *dst = '\0';
-    if (strlen(orig) == 4) { strcat(orig, "00"); } /* Convert HHMM -> HHMMSS */
+    if (strlen(orig) == 4) { strcat(orig, "00"); }
 }
 
-/* Converts name formats (DOE, JOHN A or JOHN A DOE) to DICOM standard Last^First^Middle */
 static void FormatPatientName(char *pName) {
     TrimInPlace(pName);
     if (*pName == '\0' || strchr(pName, '^') != NULL) return;
@@ -284,15 +317,61 @@ static int StrIEquals(const char *a, const char *b) {
     return 0;
 }
 
+static int StrNIEquals(const char *a, const char *b, int len) {
+    for (int i = 0; i < len; i++) {
+        if (UpperChar(a[i]) != UpperChar(b[i])) return 0;
+        if (a[i] == '\0' || b[i] == '\0') return 0;
+    }
+    return 1;
+}
+
+static char* StrIStr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+    int len = (int)strlen(needle);
+    while (*haystack) {
+        if (StrNIEquals(haystack, needle, len)) return (char*)haystack;
+        haystack++;
+    }
+    return NULL;
+}
+
 static int IsEightDigits(const char *pStr) {
     if (*pStr == '\0') return 0;
     for (int i = 0; i < 8; i++) if (pStr[i] < '0' || pStr[i] > '9') return 0;
     return (pStr[8] == '\0');
 }
 
+/* Hardened SendText: Handles WSAEWOULDBLOCK on non-blocking sockets */
 static void SendText(SOCKET sock, const char *pText) {
+    if (!pText || sock == INVALID_SOCKET || sock == 0) return;
     int nLen = (int)strlen(pText);
-    if (nLen > 0) send(sock, pText, nLen, 0);
+    int total = 0;
+    while (total < nLen) {
+        int r = send(sock, pText + total, nLen - total, 0);
+        if (r > 0) {
+            total += r;
+        } else if (r == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK || err == WSAENOBUFS) {
+                Sleep(1); /* Allow OS TCP buffer to flush before retrying */
+                continue;
+            }
+            break; /* Fatal socket error */
+        } else {
+            break;
+        }
+    }
+}
+
+/* Cleanly closes an HTTP client by draining unread receive data to prevent TCP RST */
+static void CloseHttpClient(int clientIdx) {
+    SOCKET sock = g_clients[clientIdx];
+    if (sock != 0 && sock != INVALID_SOCKET) {
+        char dumpBuf[1024];
+        while (recv(sock, dumpBuf, sizeof(dumpBuf), 0) > 0) { }
+        shutdown(sock, SD_SEND);
+    }
+    RemoveClient(clientIdx);
 }
 
 /* ===== Config ===== */
@@ -319,6 +398,26 @@ static void LoadConfig(void) {
     g_DicomPort = GetPrivateProfileInt(szIniServer, szIniDicomPort, 104, szIniFile);
     g_TelnetTimeout = GetPrivateProfileInt(szIniServer, szIniTelnetTimeout, 10, szIniFile);
     g_DebugLog = GetPrivateProfileInt(szIniServer, szIniDebugLog, 1, szIniFile);
+}
+
+static void SaveConfig(void) {
+    char buf[16];
+    WritePrivateProfileString(szIniServer, szIniAET, g_aeCalled, szIniFile);
+    
+    snprintf(buf, sizeof(buf), "%d", g_TelnetPort);
+    WritePrivateProfileString(szIniServer, szIniTelnetPort, buf, szIniFile);
+    
+    snprintf(buf, sizeof(buf), "%d", g_HttpPort);
+    WritePrivateProfileString(szIniServer, szIniHttpPort, buf, szIniFile);
+    
+    snprintf(buf, sizeof(buf), "%d", g_DicomPort);
+    WritePrivateProfileString(szIniServer, szIniDicomPort, buf, szIniFile);
+    
+    snprintf(buf, sizeof(buf), "%d", g_TelnetTimeout);
+    WritePrivateProfileString(szIniServer, szIniTelnetTimeout, buf, szIniFile);
+    
+    snprintf(buf, sizeof(buf), "%d", g_DebugLog);
+    WritePrivateProfileString(szIniServer, szIniDebugLog, buf, szIniFile);
 }
 
 /* ===== CSV Functions ===== */
@@ -372,7 +471,6 @@ static void EnsureCsvInitialized(void) {
     g_csvInitialized = 1;
     strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1); g_csvData[0][LINE_SIZE - 1] = '\0';
     
-    // Parse the fake patient and inject the live system date
     char entry[ENTRY_SIZE];
     ParseCSVLineToEntry(szFakePatient, entry);
     
@@ -381,7 +479,6 @@ static void EnsureCsvInitialized(void) {
     char today[16];
     snprintf(today, sizeof(today), "%04d%02d%02d", st.wYear, st.wMonth, st.wDay);
     
-    // Index 12 is the StartDate field
     strncpy(GetFieldPtr(entry, 12), today, FIELD_SIZE - 1);
     
     char fakePat[LINE_SIZE];
@@ -391,6 +488,7 @@ static void EnsureCsvInitialized(void) {
     g_csvData[1][LINE_SIZE - 1] = '\0';
     
     g_csvRows = 2;
+ //g_csvRows = 1; 
 }
 
 static int AccessionEquals(const char *pLine, const char *pAccession) {
@@ -401,6 +499,7 @@ static int AccessionEquals(const char *pLine, const char *pAccession) {
 
 static int UpdateCsvByPatient(char *pEntry, const char *pLineOut) {
     EnsureCsvInitialized();
+
     char *pAcc = GetFieldPtr(pEntry, 8);
     EnterCriticalSection(&g_csvLock);
     int found = 0;
@@ -427,6 +526,44 @@ static void GenerateStudyUIDIfNeeded(char *pEntry) {
         int r = rand() % 10000;
         snprintf(pUID, FIELD_SIZE, "1.2.840.113619.2.1.%u.%d", (unsigned int)ticks, r);
     }
+}
+
+/* ===== Procedure Codes Loading ===== */
+static void LoadProcedureCodes(void) {
+    EnterCriticalSection(&g_procCodesLock);
+    FILE *fp = fopen("procedurecodes.csv", "r");
+    if (!fp) {
+        g_procCodesLoaded = 1;
+        LeaveCriticalSection(&g_procCodesLock);
+        return;
+    }
+    
+    char line[LINE_SIZE];
+    g_procCodeCount = 0;
+    int firstLine = 1;
+    while (fgets(line, sizeof(line), fp) && g_procCodeCount < MAX_PROC_CODES) {
+        if (firstLine) { firstLine = 0; continue; }
+        char *newline = strchr(line, '\n');
+        if (newline) *newline = '\0';
+        newline = strchr(line, '\r');
+        if (newline) *newline = '\0';
+        
+        char *fields[4] = {g_procCodes[g_procCodeCount].id, 
+                          g_procCodes[g_procCodeCount].procCode,
+                          g_procCodes[g_procCodeCount].modality,
+                          g_procCodes[g_procCodeCount].name};
+        char *p = line;
+        for (int i = 0; i < 4; i++) {
+            char *comma = strchr(p, ',');
+            if (comma) { *comma = '\0'; strncpy(fields[i], p, 64); fields[i][64] = '\0'; TrimInPlace(fields[i]); p = comma + 1; }
+            else { strncpy(fields[i], p, 64); fields[i][64] = '\0'; TrimInPlace(fields[i]); break; }
+        }
+        g_procCodeCount++;
+    }
+    fclose(fp);
+    g_procCodesLoaded = 1;
+    LeaveCriticalSection(&g_procCodesLock);
+    write_log("Procedure codes loaded");
 }
 
 /* ===== DICOM Helpers ===== */
@@ -530,7 +667,7 @@ static void send_pdata_tf(SOCKET s, uint8_t pc_id, uint8_t msg_ctrl, const uint8
     free(pdu_buf);
 }
 
-/* Hardened DICOM tag extractor (fixes VR misinterpretation bug and 0-length loops) */
+/* Hardened DICOM tag extractor */
 static void dicom_get_string(const uint8_t *buf, int len, uint16_t g, uint16_t e, char *out) {
     uint8_t tg[4] = { (uint8_t)(g & 0xFF), (uint8_t)(g >> 8), (uint8_t)(e & 0xFF), (uint8_t)(e >> 8) };
     for (int i = 0; i < len - 8; i++) {
@@ -622,11 +759,10 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
     char qAET[64] = {0};
     char qMod[64] = {0};
     
-    // Extract query tags
     dicom_get_string(req_buf, req_len, 0x0008, 0x0060, qMod);
     dicom_get_string(req_buf, req_len, 0x0040, 0x0001, qAET);
     dicom_get_string(req_buf, req_len, 0x0040, 0x0002, qDate);
-    dicom_get_string(req_buf, req_len, 0x0040, 0x0003, qTime); // Fixed Time extraction
+    dicom_get_string(req_buf, req_len, 0x0040, 0x0003, qTime);
 
     EnsureCsvInitialized();
     {
@@ -634,7 +770,6 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
         for (row = 1; row < g_csvRows; row++) {
             MWLEntry e; parse_csv_line_mwl(g_csvData[row], &e);
             
-            // Apply DICOM Filters
             if (qMod[0] != '\0' && strcmp(qMod, e.modality) != 0) continue;
             if (qAET[0] != '\0' && strcmp(qAET, e.aeTitle) != 0) continue;
             if (qDate[0] != '\0') {
@@ -658,7 +793,6 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
                     if (t1[0] != '\0' && strcmp(e.spsTime, t1) < 0) continue;
                     if (t2[0] != '\0' && strcmp(e.spsTime, t2) > 0) continue;
                 } else {
-                    // Startswith / exact string match
                     if (strncmp(e.spsTime, qTime, strlen(qTime)) != 0) continue;
                 }
             }
@@ -677,8 +811,6 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             
             uint8_t data_buf[4096]; int data_len = 0;
             
-            // --- ROOT LEVEL TAGS (Must be strictly ascending) ---
-// --- ROOT LEVEL TAGS (Must be strictly ascending) ---
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0050, e.accNum);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0090, e.refPhys);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0010, e.patientName);
@@ -687,7 +819,6 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0020, 0x000D, e.studyUID);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0032, 0x1060, e.procDesc);
 
-            // --- SCHEDULED PROCEDURE STEP SEQUENCE (0040,0100) ---
             dicom_seq_hdr(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0100);
             dicom_item_hdr(data_buf, &data_len, sizeof(data_buf));
             
@@ -697,7 +828,6 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0003, e.spsTime);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0007, e.spsDesc);
             
-            // Protocol Code Sequence (0040,0008)
             dicom_seq_hdr(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0008);
             dicom_item_hdr(data_buf, &data_len, sizeof(data_buf));
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0100, e.protoCode);
@@ -711,14 +841,12 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             dicom_item_delim(data_buf, &data_len, sizeof(data_buf));
             dicom_seq_delim(data_buf, &data_len, sizeof(data_buf));
 
-            // --- BACK TO ROOT LEVEL ---
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x1001, e.procID); 
 
             send_pdata_tf(clientSocket, pc_id, 0x02, data_buf, data_len);
         }
     }
     
-    // Send C-FIND Success Response
     uint8_t cmd_buf[256]; int cmd_len = 0;
     dicom_add_ul(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0000, 0);
     dicom_add_string(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0002, "1.2.840.10008.5.1.4.31");
@@ -735,27 +863,22 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
 static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead) {
     if (bytesRead < 6) return;
 
-    /* P-DATA-TF PDU layout:
-     *   byte 0     = 0x04 (PDU type)
-     *   byte 1     = reserved
-     *   bytes 2-5  = PDU length (big-endian)
-     *   bytes 6+   = one or more PDVs
-     *
-     * Each PDV layout:
-     *   bytes 0-3  = PDV length (big-endian) — includes PC-id, msg-ctrl, and data
-     *   byte 4     = Presentation Context ID
-     *   byte 5     = Message Control (bit 0: 1=command, 0=data; bit 1: 1=last fragment)
-     *   bytes 6+   = fragment payload
-     */
-
     uint32_t pdu_len = ((uint32_t)(uint8_t)buffer[2] << 24) |
                        ((uint32_t)(uint8_t)buffer[3] << 16) |
                        ((uint32_t)(uint8_t)buffer[4] << 8)  |
                         (uint32_t)(uint8_t)buffer[5];
 
-    int pos = 6;               /* skip PDU header */
+    int pos = 6;               
     int end = 6 + (int)pdu_len;
     if (end > bytesRead) end = bytesRead;
+
+    static uint8_t g_findCmd[8192];
+    static int     g_findCmdLen = 0;
+    static uint8_t g_findData[8192];
+    static int     g_findDataLen = 0;
+    static uint8_t g_findPcId = 0;
+    static uint16_t g_findMsgId = 0;
+    static uint16_t g_findCommand = 0;
 
     while (pos + 6 <= end) {
         uint32_t pdv_len = ((uint32_t)(uint8_t)buffer[pos]     << 24) |
@@ -765,7 +888,7 @@ static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead) {
         uint8_t pc_id    = buffer[pos + 4];
         uint8_t msg_ctrl = buffer[pos + 5];
         int     data_off = pos + 6;
-        int     data_len = (int)pdv_len - 2;   /* subtract PC-id + msg-ctrl bytes */
+        int     data_len = (int)pdv_len - 2;
 
         if (data_len < 0 || data_off + data_len > end) break;
 
@@ -773,7 +896,6 @@ static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead) {
         bool is_last_frag = (msg_ctrl & 0x02) != 0;
 
         if (is_command) {
-            /* Accumulate command fragment */
             if (g_findCmdLen + data_len < (int)sizeof(g_findCmd)) {
                 memcpy(g_findCmd + g_findCmdLen, buffer + data_off, data_len);
                 g_findCmdLen += data_len;
@@ -781,20 +903,15 @@ static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead) {
             g_findPcId = pc_id;
 
             if (is_last_frag) {
-                /* Parse Command Field (0000,0100) and Message ID (0000,0120)
-                 * from accumulated command set. Both are US with VL=2 in
-                 * Implicit VR LE: tag(4) + VL(4) + value(2) = 10 bytes. */
                 g_findCommand = 0;
                 g_findMsgId   = 0;
                 for (int i = 0; i <= g_findCmdLen - 10; i++) {
-                    /* (0000,0100) — Command Field */
                     if (g_findCmd[i] == 0x00 && g_findCmd[i + 1] == 0x00 &&
                         g_findCmd[i + 2] == 0x00 && g_findCmd[i + 3] == 0x01 &&
                         g_findCmd[i + 4] == 0x02 && g_findCmd[i + 5] == 0x00) {
                         g_findCommand = (uint16_t)g_findCmd[i + 8] |
                                         ((uint16_t)g_findCmd[i + 9] << 8);
                     }
-                    /* (0000,0120) — Message ID */
                     if (g_findCmd[i] == 0x00 && g_findCmd[i + 1] == 0x00 &&
                         g_findCmd[i + 2] == 0x20 && g_findCmd[i + 3] == 0x01 &&
                         g_findCmd[i + 4] == 0x02 && g_findCmd[i + 5] == 0x00) {
@@ -804,22 +921,18 @@ static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead) {
                 }
 
                 if (g_findCommand == 0x0030) {
-                    /* C-ECHO-RQ — no data set follows, handle immediately */
                     handle_c_echo_rq(clientSocket, g_findPcId, g_findMsgId);
                     g_findCmdLen  = 0;
                     g_findDataLen = 0;
                 }
-                /* For C-FIND (0x0020), wait for data set fragments to arrive */
             }
         } else {
-            /* Accumulate data (identifier) fragment */
             if (g_findDataLen + data_len < (int)sizeof(g_findData)) {
                 memcpy(g_findData + g_findDataLen, buffer + data_off, data_len);
                 g_findDataLen += data_len;
             }
 
             if (is_last_frag) {
-                /* Complete query identifier received */
                 if (g_findCommand == 0x0020) {
                     handle_c_find_rq(clientSocket, g_findPcId, g_findMsgId,
                                      g_findData, g_findDataLen);
@@ -829,7 +942,7 @@ static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead) {
             }
         }
 
-        pos += 4 + (int)pdv_len;   /* advance to next PDV */
+        pos += 4 + (int)pdv_len;
     }
 }
 
@@ -921,7 +1034,6 @@ static void ProcessDispCommand(int clientIdx, const char *pLine) {
 static void CommitPendingEntry(int clientIdx) {
     char *pEntry = GetPendingEntryPtr(clientIdx);
     
-    // Auto-Format DICOM Name, Dates, and Study UIDs natively
     StripDashes(GetFieldPtr(pEntry, 2)); 
     StripDashes(GetFieldPtr(pEntry, 12));
     StripColons(GetFieldPtr(pEntry, 13));
@@ -946,27 +1058,41 @@ static void ProcessClientLine(int clientIdx, char *pLine) {
     SendText(g_clients[clientIdx], szPendingResp); printf(szPendingFmt, GetFieldPtr(pPending, 8));
 }
 
+/* Hardened HTTP Request Processor: Buffers table rows and streams elements reliably */
 static void ProcessHttpClient(int clientIdx, char *pBuf) {
     SOCKET sock = g_clients[clientIdx];
     char *headerEnd = strstr(pBuf, "\r\n\r\n"); if (!headerEnd) return;
     
     if (pBuf[0] == 'G') {
-        SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
+        SendText(sock, szHttp200OK); 
+        SendText(sock, szHtmlStart);
         EnsureCsvInitialized();
-        { int isHeader = 1; SendText(sock, "<table id='pTable'>");
+        { 
+            int isHeader = 1; 
+            SendText(sock, "<table id='pTable'>");
             for (int ri = 0; ri < g_csvRows; ri++) {
-                char entry[ENTRY_SIZE]; ParseCSVLineToEntry(g_csvData[ri], entry);
-                SendText(sock, isHeader ? "<tr>" : "<tr onclick='f(this)' style='cursor:pointer;'>");
+                char entry[ENTRY_SIZE]; 
+                ParseCSVLineToEntry(g_csvData[ri], entry);
+                
+                /* Assemble row into line buffer to reduce socket send overhead by 98% */
+                char rowBuf[LINE_SIZE]; rowBuf[0] = '\0';
+                strcat(rowBuf, isHeader ? "<tr>" : "<tr onclick='f(this)' style='cursor:pointer;'>");
                 for (int fi = 0; fi < FIELD_COUNT; fi++) {
-                    SendText(sock, isHeader ? "<th onclick='sortTable(this.cellIndex)'>" : "<td>");
-                    SendText(sock, GetFieldPtr(entry, fi)); SendText(sock, isHeader ? "</th>" : "</td>");
+                    strcat(rowBuf, isHeader ? "<th onclick='sortTable(this.cellIndex)'>" : "<td>");
+                    strcat(rowBuf, GetFieldPtr(entry, fi));
+                    strcat(rowBuf, isHeader ? "</th>" : "</td>");
                 }
-                SendText(sock, "</tr>"); isHeader = 0;
+                strcat(rowBuf, "</tr>");
+                SendText(sock, rowBuf);
+                isHeader = 0;
             }
             SendText(sock, "</table><script>formatDates();</script>");
         }
 
+        /* Send forms Part 1 */
         SendText(sock, szHtmlForms1);
+
+        /* Send station rooms dropdowns */
         FILE *fr = fopen("rooms.csv", "r");
         if (fr) {
             char line[256];
@@ -990,17 +1116,26 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             for (int i = 0; i < rCount; i++) {
                 char tmp[256]; snprintf(tmp, sizeof(tmp), "{id:'%s',loc:'%s',mod:'%s',ae:'%s',name:'%s'},", rId[i], rLoc[i], rMod[i], rAe[i], rName[i]); strcat(js, tmp);
             }
-            strcat(js, "]; function updR() { var idx = document.getElementsByName('StationName')[0].selectedIndex - 1; if(idx>=0) { "
-                       "var r=rData[idx]; document.getElementsByName('Location')[0].value=r.id; "
+            strcat(js, "]; function updR(el) { var idx = el.selectedIndex - 1; if(idx>=0) { "
+                       "var r=rData[idx]; "
+                       "document.getElementsByName('Location')[0].selectedIndex = el.selectedIndex; "
+                       "document.getElementsByName('StationName')[0].selectedIndex = el.selectedIndex; "
                        "document.getElementsByName('Modality')[0].value=r.mod; "
                        "document.getElementsByName('StationAE')[0].value=r.ae; "
                        "document.getElementsByName('SPSID')[0].value=r.ae; "
-                       "document.getElementsByName('ProcDesc')[0].value=r.name; } }</script>");
+                       "} }</script>");
             SendText(sock, js);
 
-            SendText(sock, "<select name='StationName' onchange='updR()'><option value=''>Station Name</option>");
+            SendText(sock, "<select name='StationName' onchange='updR(this)'><option value=''>Station Name</option>");
             for (int i = 0; i < rCount; i++) {
                 char tmp[256]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rName[i], rName[i]); SendText(sock, tmp);
+            }
+            SendText(sock, "</select> ");
+
+            // Update Location dropdown
+            SendText(sock, "<select name='Location' onchange='updR(this)'><option value=''>Location</option>");
+            for (int i = 0; i < rCount; i++) {
+                char tmp[256]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rId[i], rLoc[i]); SendText(sock, tmp);
             }
             SendText(sock, "</select> ");
 
@@ -1012,17 +1147,33 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         } else {
             SendText(sock, "<input type='text' name='StationName' placeholder='Station Name'> <input type='text' name='Location' placeholder='Location'> ");
         }
-        SendText(sock, szHtmlForms2);
         
-        SendText(sock, szHtmlEnd); RemoveClient(clientIdx); return;
+        /* Stream procedure codes directly to avoid stack overflow risks */
+        SendText(sock, "<select id='procCodeSel' onchange=\"loadProcCode()\"><option value=''>Select Procedure Code</option>");
+        if (g_procCodesLoaded) {
+            for (int i = 0; i < g_procCodeCount; i++) {
+                char opt[512];
+                snprintf(opt, sizeof(opt), "<option value='%s' data-id='%s' data-code='%s' data-mod='%s'>%s</option>",
+                        g_procCodes[i].id, g_procCodes[i].id, g_procCodes[i].procCode, g_procCodes[i].modality, g_procCodes[i].name);
+                SendText(sock, opt);
+            }
+        }
+        SendText(sock, "</select> ");
+
+        SendText(sock, szHtmlForms2);
+        SendText(sock, szHtmlEnd); 
+        CloseHttpClient(clientIdx); 
+        return;
     }
     if (pBuf[0] == 'P') {
         char *body = strstr(pBuf, "\r\n\r\n"); if (!body) { RemoveClient(clientIdx); return; }
         body += 4;
         
-        /* Wait for the entire payload to arrive before processing */
-        char *clPtr = strstr(pBuf, "Content-Length:");
-        if (clPtr && (int)strlen(body) < atoi(clPtr + 15)) return;
+        char *clPtr = StrIStr(pBuf, "Content-Length:");
+        if (clPtr) {
+            char *val = strchr(clPtr, ':');
+            if (val && (int)strlen(body) < atoi(val + 1)) return;
+        }
         
         if (strstr(pBuf, "POST /delete")) {
             EnterCriticalSection(&g_csvLock);
@@ -1048,10 +1199,9 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             }
             LeaveCriticalSection(&g_csvLock);
         }
-else if (strstr(pBuf, "POST /manual")) {
+        else if (strstr(pBuf, "POST /manual")) {
             if (!body[0]) { RemoveClient(clientIdx); return; }
             
-            // Strip trailing HTTP carriage returns/newlines from the body payload
             int blen = (int)strlen(body);
             while (blen > 0 && (body[blen-1] == '\r' || body[blen-1] == '\n' || body[blen-1] == ' ')) {
                 body[--blen] = '\0';
@@ -1068,7 +1218,7 @@ else if (strstr(pBuf, "POST /manual")) {
                 UpdateCsvByPatient(entry, g_lineOut); 
             }
         }
- else if (strstr(pBuf, "POST /upload")) {
+        else if (strstr(pBuf, "POST /upload")) {
             char *csvStart = strstr(pBuf, szCSVHeader);
             if (csvStart) { char *si = csvStart; while (*si && *si != '\n') si++; if (*si) si++;
                 while (*si) { if (*si == '-') break; if (*si == '\r' || *si == '\n') { si++; continue; }
@@ -1089,7 +1239,9 @@ else if (strstr(pBuf, "POST /manual")) {
         }
         SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
         SendText(sock, "<meta http-equiv='refresh' content='0; url=/' /><h2>Action Complete</h2>");
-        SendText(sock, szHtmlEnd); RemoveClient(clientIdx); return;
+        SendText(sock, szHtmlEnd); 
+        CloseHttpClient(clientIdx); 
+        return;
     }
     RemoveClient(clientIdx);
 }
@@ -1207,8 +1359,12 @@ static void ServerStart(void) {
     if (g_bRunning) return;
     StartTelnetServer(); StartHttpServer(); StartDicomServer();
     g_bRunning = 1;
-    ModifyMenu(g_hMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING, ID_TRAY_TOGGLE, szMenuStop);
-    printf(szServerStarted);
+    
+    HMENU hSubMenu = GetSubMenu(g_hMenu, 0);
+    ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING | MF_CHECKED, ID_TRAY_TOGGLE, szMenuStop);
+    
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
+    printf("%s", szServerStarted);
 }
 
 static void ServerStop(void) {
@@ -1218,8 +1374,10 @@ static void ServerStop(void) {
     if (g_listenSocketHttp != INVALID_SOCKET) { closesocket(g_listenSocketHttp); g_listenSocketHttp = INVALID_SOCKET; }
     if (g_listenSocketDicom != INVALID_SOCKET) { closesocket(g_listenSocketDicom); g_listenSocketDicom = INVALID_SOCKET; }
     g_bRunning = 0;
-    ModifyMenu(g_hMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING, ID_TRAY_TOGGLE, szMenuStart);
-    printf(szServerStopped);
+    
+    HMENU hSubMenu = GetSubMenu(g_hMenu, 0);
+    ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING, ID_TRAY_TOGGLE, szMenuStart);
+    printf("%s", szServerStopped);
 }
 
 static void ServerLoop(void) {
@@ -1231,6 +1389,157 @@ static void ServerLoop(void) {
     if (!g_bRunning) return;
     AcceptNewClients();
     for (int i = 0; i < MAX_CLIENTS; i++) PollClient(i);
+}
+
+/* ===== Settings Dialog Handler ===== */
+static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_INITDIALOG:
+            SetDlgItemText(hDlg, ID_EDT_AET, g_aeCalled);
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%d", g_TelnetPort);
+            SetDlgItemText(hDlg, ID_EDT_TELNET, buf);
+            snprintf(buf, sizeof(buf), "%d", g_HttpPort);
+            SetDlgItemText(hDlg, ID_EDT_HTTP, buf);
+            snprintf(buf, sizeof(buf), "%d", g_DicomPort);
+            SetDlgItemText(hDlg, ID_EDT_DICOM, buf);
+            snprintf(buf, sizeof(buf), "%d", g_TelnetTimeout);
+            SetDlgItemText(hDlg, ID_EDT_TIMEOUT, buf);
+            CheckDlgButton(hDlg, ID_CHK_DEBUG, g_DebugLog ? BST_CHECKED : BST_UNCHECKED);
+            
+            HBRUSH hBrush = CreateSolidBrush(g_bRunning ? RGB(0, 200, 0) : RGB(200, 200, 200));
+            SetWindowLongPtr(hDlg, DWLP_USER, (LONG_PTR)hBrush);
+            return TRUE;
+            
+        case WM_CTLCOLORSTATIC: {
+            HDC hdcStatic = (HDC)wParam;
+            SetTextColor(hdcStatic, RGB(0, 0, 0));
+            SetBkColor(hdcStatic, RGB(255, 255, 255));
+            HBRUSH hBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
+            if (hBrush) return (INT_PTR)hBrush;
+            return (INT_PTR)CreateSolidBrush(RGB(255, 255, 255));
+        }
+        
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case ID_BTN_STARTSTOP:
+                    if (g_bRunning) {
+                        ServerStop();
+                        SetWindowText((HWND)lParam, "Start Server");
+                        HBRUSH oldBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
+                        DeleteObject(oldBrush);
+                        HBRUSH hBrush = CreateSolidBrush(RGB(200, 200, 200));
+                        SetWindowLongPtr(hDlg, DWLP_USER, (LONG_PTR)hBrush);
+                    } else {
+                        ServerStart();
+                        SetWindowText((HWND)lParam, "Stop Server");
+                        HBRUSH oldBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
+                        DeleteObject(oldBrush);
+                        HBRUSH hBrush = CreateSolidBrush(RGB(0, 200, 0));
+                        SetWindowLongPtr(hDlg, DWLP_USER, (LONG_PTR)hBrush);
+                    }
+                    HMENU hSubMenu = GetSubMenu(g_hMenu, 0);
+                    if (g_bRunning)
+                        ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING | MF_CHECKED, ID_TRAY_TOGGLE, szMenuStop);
+                    else
+                        ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING, ID_TRAY_TOGGLE, szMenuStart);
+                    break;
+                    
+                case ID_OK: {
+                    GetDlgItemText(hDlg, ID_EDT_AET, g_aeCalled, sizeof(g_aeCalled));
+                    g_aeCalled[16] = '\0';
+                    
+                    g_TelnetPort = GetDlgItemInt(hDlg, ID_EDT_TELNET, NULL, FALSE);
+                    g_HttpPort = GetDlgItemInt(hDlg, ID_EDT_HTTP, NULL, FALSE);
+                    g_DicomPort = GetDlgItemInt(hDlg, ID_EDT_DICOM, NULL, FALSE);
+                    g_TelnetTimeout = GetDlgItemInt(hDlg, ID_EDT_TIMEOUT, NULL, FALSE);
+                    g_DebugLog = IsDlgButtonChecked(hDlg, ID_CHK_DEBUG) == BST_CHECKED;
+                    
+                    SaveConfig();
+                    EndDialog(hDlg, IDOK);
+                    break;
+                }
+                case IDCANCEL:
+                    EndDialog(hDlg, IDCANCEL);
+                    break;
+            }
+            return TRUE;
+            
+        case WM_CLOSE:
+            EndDialog(hDlg, IDCANCEL);
+            return TRUE;
+            
+        case WM_DESTROY: {
+            HBRUSH hBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
+            if (hBrush) DeleteObject(hBrush);
+            break;
+        }
+    }
+    return FALSE;
+}
+
+static void ShowSettingsDialog(void) {
+    if (g_hSettingsDlg != NULL) {
+        SetForegroundWindow(g_hSettingsDlg);
+        return;
+    }
+    
+    HWND hParent = g_hMainWnd;
+    RECT rc;
+    GetWindowRect(hParent, &rc);
+    int width = 350;
+    int height = 320;
+    int left = rc.left + (rc.right - rc.left - width) / 2;
+    int top = rc.top + (rc.bottom - rc.top - height) / 2;
+    
+    g_hSettingsDlg = CreateWindowEx(
+        0, "#32770", "Server Settings",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        left, top, width, height,
+        hParent, NULL, g_hInstance, NULL
+    );
+    
+    if (!g_hSettingsDlg) return;
+    
+    int y = 20;
+    int x = 10;
+    
+    CreateWindow("STATIC", "AET Title:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
+    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, g_hSettingsDlg, (HMENU)ID_EDT_AET, g_hInstance, NULL);
+    y += 30;
+    
+    CreateWindow("STATIC", "Telnet Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
+    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_TELNET, g_hInstance, NULL);
+    y += 30;
+    
+    CreateWindow("STATIC", "HTTP Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
+    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_HTTP, g_hInstance, NULL);
+    y += 30;
+    
+    CreateWindow("STATIC", "DICOM Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
+    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_DICOM, g_hInstance, NULL);
+    y += 30;
+    
+    CreateWindow("STATIC", "Timeout (sec):", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
+    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_TIMEOUT, g_hInstance, NULL);
+    y += 30;
+    
+    CreateWindow("BUTTON", "Enable Debug Log", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x, y, 150, 20, g_hSettingsDlg, (HMENU)ID_CHK_DEBUG, g_hInstance, NULL);
+    y += 30;
+    
+    /* Widened Start/Stop server button from 170 to 240, placed effectively */
+    CreateWindow("BUTTON", g_bRunning ? "Stop Server" : "Start Server", 
+                 BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 
+                 x + 50, y, 240, 35, g_hSettingsDlg, (HMENU)ID_BTN_STARTSTOP, g_hInstance, NULL);
+    y += 45;
+    
+    CreateWindow("BUTTON", "OK", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 
+                 x + 10, y, 80, 25, g_hSettingsDlg, (HMENU)ID_OK, g_hInstance, NULL);
+    CreateWindow("BUTTON", "Cancel", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 
+                 x + 100, y, 80, 25, g_hSettingsDlg, (HMENU)IDCANCEL, g_hInstance, NULL);
+    
+    ShowWindow(g_hSettingsDlg, SW_SHOW);
+    SetForegroundWindow(g_hSettingsDlg);
 }
 
 /* ===== Win32 UI ===== */
@@ -1246,6 +1555,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         if (cmd == ID_TRAY_TOGGLE) { if (g_bRunning) ServerStop(); else ServerStart(); return 0; }
         if (cmd == ID_TRAY_SHOW) { HWND cw = GetConsoleWindow(); if (cw) { ShowWindow(cw, SW_SHOW); SetForegroundWindow(cw); } return 0; }
         if (cmd == ID_TRAY_EXIT) { g_bExitApp = 1; PostQuitMessage(0); return 0; }
+        if (cmd == ID_TRAY_SETTINGS) { ShowSettingsDialog(); return 0; }
         return 0;
     }
     if (uMsg == WM_CLOSE) { g_bExitApp = 1; PostQuitMessage(0); return 0; }
@@ -1260,9 +1570,23 @@ static void CreateTray(void) {
     RegisterClassEx(&wc);
     g_hMainWnd = CreateWindowEx(0, szWndClass, szTrayTip, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, HWND_MESSAGE, NULL, g_hInstance, NULL);
     g_hMenu = CreatePopupMenu();
-    AppendMenu(g_hMenu, MF_STRING, ID_TRAY_TOGGLE, g_bRunning ? szMenuStop : szMenuStart); AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenu(g_hMenu, MF_STRING, ID_TRAY_SHOW, szMenuShow); AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL); AppendMenu(g_hMenu, MF_STRING, ID_TRAY_EXIT, szMenuExit);
-    memset(&nid, 0, sizeof(nid)); nid.cbSize = sizeof(NOTIFYICONDATA); nid.hWnd = g_hMainWnd; nid.uID = 1; nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; nid.uCallbackMessage = WM_TRAYICON; nid.hIcon = LoadIcon(NULL, IDI_APPLICATION); strcpy(nid.szTip, szTrayTip); Shell_NotifyIcon(NIM_ADD, &nid);
+    
+    HMENU hSubMenu = CreatePopupMenu();
+    AppendMenu(hSubMenu, MF_STRING, ID_TRAY_TOGGLE, g_bRunning ? szMenuStop : szMenuStart);
+    AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hSubMenu, szMenuStart);
+    
+    AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(g_hMenu, MF_STRING, ID_TRAY_SETTINGS, szMenuSettings);
+    AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(g_hMenu, MF_STRING, ID_TRAY_SHOW, szMenuShow);
+    AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(g_hMenu, MF_STRING, ID_TRAY_EXIT, szMenuExit);
+    
+    memset(&nid, 0, sizeof(nid)); nid.cbSize = sizeof(NOTIFYICONDATA); nid.hWnd = g_hMainWnd; nid.uID = 1; 
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; nid.uCallbackMessage = WM_TRAYICON; 
+    nid.hIcon = LoadIcon(NULL, IDI_APPLICATION); 
+    strcpy(nid.szTip, szTrayTip); 
+    Shell_NotifyIcon(NIM_ADD, &nid);
     ShowWindow(GetConsoleWindow(), SW_HIDE);
 }
 
@@ -1274,7 +1598,19 @@ int main(int argc, char *argv[]) {
     ResolveIniPath(); printf("%s", szStartup); LoadConfig();
     printf(szConfigFmt, g_aeCalled, g_TelnetPort, g_HttpPort, g_DicomPort, g_TelnetTimeout, g_DebugLog);
     
-    InitializeCriticalSection(&g_csvLock); InitArrays(); WSAStartup(MAKEWORD(2, 2), &wsaData); EnsureCsvInitialized(); CreateTray(); ServerStart();
+    InitializeCriticalSection(&g_csvLock); 
+    InitializeCriticalSection(&g_procCodesLock);
+    InitArrays(); 
+    WSAStartup(MAKEWORD(2, 2), &wsaData); 
+    ;EnsureCsvInitialized(); 
+            EnterCriticalSection(&g_csvLock);
+            strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1);
+            g_csvData[0][LINE_SIZE - 1] = '\0';
+            g_csvRows = 1;
+            LeaveCriticalSection(&g_csvLock);
+    LoadProcedureCodes();
+    CreateTray(); 
+    ServerStart();
     
     hDicomThread = CreateThread(NULL, 0, DicomThread, NULL, 0, NULL); if (hDicomThread) CloseHandle(hDicomThread);
     
@@ -1284,6 +1620,6 @@ int main(int argc, char *argv[]) {
         if (PeekMessage(&qmsg, NULL, WM_QUIT, WM_QUIT, PM_NOREMOVE)) break; Sleep(10); 
     }
     
-    ServerStop(); DeleteCriticalSection(&g_csvLock); WSACleanup(); Shell_NotifyIcon(NIM_DELETE, &nid); DestroyWindow(g_hMainWnd);
+    ServerStop(); DeleteCriticalSection(&g_csvLock); DeleteCriticalSection(&g_procCodesLock); WSACleanup(); Shell_NotifyIcon(NIM_DELETE, &nid); DestroyWindow(g_hMainWnd);
     return 0;
 }
