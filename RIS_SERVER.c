@@ -7,6 +7,7 @@
  * Compile:
  *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
  *   tcc -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
+ *   gcc -Os -S -masm=intel -m32 RIS_SERVER_2.c -o RIS_SERVER.asm
  * ============================================================================ */
 
 #define WIN32_LEAN_AND_MEAN
