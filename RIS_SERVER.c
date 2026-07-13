@@ -7,7 +7,6 @@
  * Compile:
  *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
  *   tcc -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
- *   gcc -Os -S -masm=intel -m32 RIS_SERVER_2.c -o RIS_SERVER.asm
  * ============================================================================ */
 
 #define WIN32_LEAN_AND_MEAN
@@ -166,11 +165,10 @@ static const char *szFakePatient = "";
 
 static const char *szHtmlForms1 = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
 "<button type='button' onclick='newPatient()' class='top-btn bg-green'>New Patient</button>"
-"<form action='/upload' method='POST' enctype='multipart/form-data' style='display:inline-flex; align-items:center; gap:10px; margin:0;'>"
-"<input type='file' name='csvfile' id='csvfile' style='display:none;' onchange='document.getElementById(\"fileName\").innerText=this.files[0]?this.files[0].name:\"No file chosen\";'>"
+"<button type='button' onclick='searchPatient()' class='top-btn bg-blue'>Search</button>"
+"<form action='/upload' method='POST' enctype='multipart/form-data' id='uploadForm' style='display:inline-flex; align-items:center; gap:10px; margin:0;'>"
+"<input type='file' name='csvfile' id='csvfile' style='display:none;' onchange='document.getElementById(\"uploadForm\").submit();'>"
 "<label for='csvfile' class='top-btn bg-blue'>Choose File</label>"
-"<span id='fileName' style='color:#666; font-size:14px; width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;'>No file chosen</span>"
-"<input type='submit' value='Upload CSV' class='top-btn bg-green'>"
 "</form>"
 "<form action='/delete' method='POST' style='margin:0;'>"
 "<input type='submit' value='Delete All Data' class='top-btn bg-red'>"
@@ -178,7 +176,7 @@ static const char *szHtmlForms1 = "<div class='form-row' style='display:flex; al
 "<form id='manForm'>"
 "<input type='text' name='PatientName' placeholder='Patient Name'> <input type='text' name='PatientID' placeholder='Patient ID'> Birth: <input type='date' name='BirthDate'> <select name='Sex'><option value=''>Sex</option><option value='M'>M</option><option value='F'>F</option><option value='O'>O</option></select><br>"
 "<input type='text' name='ReqPhys' placeholder='Req Phys'> <input type='text' name='ReqSvc' placeholder='Req Svc'> <input type='text' name='ProcDesc' placeholder='Proc Desc'> <input type='text' name='Reason' placeholder='Reason'><br>"
-"<input type='text' name='Accession' placeholder='Accession'> <input type='text' name='ProcID' placeholder='Proc ID'> <select name='Priority'><option value='0' selected>LOW</option><option value='1'>MEDIUM</option><option value='2'>ROUTINE</option><option value='3'>HIGH</option></select> <input type='text' name='StationAE' placeholder='Station AE'><br>"
+"<input type='text' name='Accession' placeholder='Accession'> <input type='text' name='ProcID' placeholder='Proc ID'> <select name='Priority'><option value='LOW' selected>LOW</option><option value='MEDIUM'>MEDIUM</option><option value='ROUTINE'>ROUTINE</option><option value='HIGH'>HIGH</option></select> <input type='text' name='StationAE' placeholder='Station AE'><br>"
 "Start: <input type='date' name='StartDate'> Time: <input type='time' name='StartTime'> <input type='text' name='PerfPhys' placeholder='Perf Phys'> <input type='text' name='SPSDesc' placeholder='SPS Desc'><br>"
 "<input type='text' name='SPSID' placeholder='SPS ID'> ";
 
@@ -209,12 +207,12 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 "var tm=c[13].innerText;if(tm.length===6)c[13].innerText=tm.substr(0,2)+':'+tm.substr(2,2);"
 "}}}"
 "function nxtA(){var t=document.getElementById('pTable'),m=0,p='ACC',c=5;if(t){for(var i=1;i<t.rows.length;i++){var v=t.rows[i].cells[8].innerText||'',mt=v.match(/([^0-9]*)([0-9]+)/);if(mt){p=mt[1];var val=parseInt(mt[2],10);if(val>m){m=val;c=mt[2].length;}}}}m++;document.getElementsByName('Accession')[0].value=p+String(m).padStart(c,'0');}"
-"function newPatient(){for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}var stat=document.getElementsByName('Status')[0];if(stat)stat.value='1';}"
-"function loadProcCode(){var sel=document.getElementById('procCodeSel');if(sel&&sel.selectedIndex>0){"
-"var opt=sel.options[sel.selectedIndex];"
+"function newPatient(){for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}var stat=document.getElementsByName('Status')[0];if(stat)stat.value='1';var pri=document.getElementsByName('Priority')[0];if(pri)pri.value='LOW';}"
+"function loadProcCode(){var sel=document.getElementById('procCodeSel');if(sel&&sel.selectedIndex>0){var idx=sel.selectedIndex;"
 "var id=document.getElementsByName('ProcID')[0];var code=document.getElementsByName('SPSID')[0];var mod=document.getElementsByName('Modality')[0];var desc=document.getElementsByName('ProcDesc')[0];"
-"if(id&&code&&mod&&desc){id.value=opt.getAttribute('data-id');code.value=opt.getAttribute('data-code');mod.value=opt.getAttribute('data-mod');desc.value=opt.text;}}"
+"if(id&&code&&mod&&desc){id.value=sel.options[idx].getAttribute('data-id');code.value=sel.options[idx].getAttribute('data-code');mod.value=sel.options[idx].getAttribute('data-mod');desc.value=sel.options[idx].text;}}"
 "}"
+"function searchPatient(){alert('Search not implemented');}"
 "window.onload=function(){newPatient();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
 
 static const char *szHtmlEnd = "</body></html>";
@@ -489,7 +487,6 @@ static void EnsureCsvInitialized(void) {
     g_csvData[1][LINE_SIZE - 1] = '\0';
     
     g_csvRows = 2;
- //g_csvRows = 1; 
 }
 
 static int AccessionEquals(const char *pLine, const char *pAccession) {
@@ -1055,8 +1052,7 @@ static void ProcessClientLine(int clientIdx, char *pLine) {
     if (StartsWithDISP(pLine)) { ProcessDispCommand(clientIdx, pLine); return; }
     if (!ParseCSVLineToEntry(pLine, entry) || !ValidateEntry(entry)) { SendText(g_clients[clientIdx], szInvalidResp); return; }
     char *pPending = GetPendingEntryPtr(clientIdx); memcpy(pPending, entry, ENTRY_SIZE);
-    g_pendingFlag[clientIdx] = 1; g_pendingSince[clientIdx] = GetTickCount(); g_clientTimeout[clientIdx] += 1000;
-    SendText(g_clients[clientIdx], szPendingResp); printf(szPendingFmt, GetFieldPtr(pPending, 8));
+    CommitPendingEntry(clientIdx); 
 }
 
 /* Hardened HTTP Request Processor: Buffers table rows and streams elements reliably */
@@ -1096,55 +1092,41 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         /* Send station rooms dropdowns */
         FILE *fr = fopen("rooms.csv", "r");
         if (fr) {
-            char line[256];
-            char rId[64][32], rLoc[64][64], rMod[64][32], rAe[64][64], rName[64][64];
+            char line[512];
+            char rId[64][32], rLoc[64][64], rMod[64][32], rAe[64][64], rName[64][64], rRoom[64][64];
             int rCount = 0, isHeader = 1;
             while (fgets(line, sizeof(line), fr) && rCount < 64) {
                 if (isHeader) { isHeader = 0; continue; }
                 char *p = line;
-                char *fields[5] = {rId[rCount], rLoc[rCount], rMod[rCount], rAe[rCount], rName[rCount]};
-                for (int i = 0; i < 5; i++) {
+                char *fields[6] = {rId[rCount], rLoc[rCount], rMod[rCount], rAe[rCount], rName[rCount], rRoom[rCount]};
+                for (int i = 0; i < 6; i++) {
                     char *comma = strchr(p, ',');
                     if (comma) { *comma = '\0'; strncpy(fields[i], p, 63); fields[i][63] = '\0'; p = comma + 1; }
                     else { strncpy(fields[i], p, 63); fields[i][63] = '\0'; break; }
                 }
-                trim_mwl(rId[rCount]); trim_mwl(rLoc[rCount]); trim_mwl(rMod[rCount]); trim_mwl(rAe[rCount]); trim_mwl(rName[rCount]);
+                trim_mwl(rId[rCount]); trim_mwl(rLoc[rCount]); trim_mwl(rMod[rCount]); trim_mwl(rAe[rCount]); trim_mwl(rName[rCount]); trim_mwl(rRoom[rCount]);
                 rCount++;
             }
             fclose(fr);
 
             char js[4096] = "<script>var rData = [";
             for (int i = 0; i < rCount; i++) {
-                char tmp[256]; snprintf(tmp, sizeof(tmp), "{id:'%s',loc:'%s',mod:'%s',ae:'%s',name:'%s'},", rId[i], rLoc[i], rMod[i], rAe[i], rName[i]); strcat(js, tmp);
+                char tmp[512]; snprintf(tmp, sizeof(tmp), "{id:'%s',loc:'%s',mod:'%s',ae:'%s',name:'%s',room:'%s'},", rId[i], rLoc[i], rMod[i], rAe[i], rName[i], rRoom[i]); strcat(js, tmp);
             }
-            strcat(js, "]; function updR(el) { var idx = el.selectedIndex - 1; if(idx>=0) { "
-                       "var r=rData[idx]; "
-                       "document.getElementsByName('Location')[0].selectedIndex = el.selectedIndex; "
-                       "document.getElementsByName('StationName')[0].selectedIndex = el.selectedIndex; "
+            strcat(js, "]; function updR() { var idx = document.getElementsByName('StationName')[0].selectedIndex - 1; if(idx>=0) { "
+                       "var r=rData[idx]; document.getElementsByName('Location')[0].value=r.room; "
                        "document.getElementsByName('Modality')[0].value=r.mod; "
                        "document.getElementsByName('StationAE')[0].value=r.ae; "
                        "document.getElementsByName('SPSID')[0].value=r.ae; "
-                       "} }</script>");
+                       "document.getElementsByName('ProcDesc')[0].value=r.name; } }</script>");
             SendText(sock, js);
 
-            SendText(sock, "<select name='StationName' onchange='updR(this)'><option value=''>Station Name</option>");
+            SendText(sock, "<select name='StationName' onchange='updR()'><option value=''>Station Name</option>");
             for (int i = 0; i < rCount; i++) {
                 char tmp[256]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rName[i], rName[i]); SendText(sock, tmp);
             }
             SendText(sock, "</select> ");
-
-            // Update Location dropdown
-            SendText(sock, "<select name='Location' onchange='updR(this)'><option value=''>Location</option>");
-            for (int i = 0; i < rCount; i++) {
-                char tmp[256]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rId[i], rLoc[i]); SendText(sock, tmp);
-            }
-            SendText(sock, "</select> ");
-
-            SendText(sock, "<select name='Location'><option value=''>Location</option>");
-            for (int i = 0; i < rCount; i++) {
-                char tmp[256]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rId[i], rLoc[i]); SendText(sock, tmp);
-            }
-            SendText(sock, "</select> ");
+            SendText(sock, "<input type='text' name='Location' placeholder='Location'> ");
         } else {
             SendText(sock, "<input type='text' name='StationName' placeholder='Station Name'> <input type='text' name='Location' placeholder='Location'> ");
         }
@@ -1250,10 +1232,6 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
 static void CheckPendingAndTimeout(int clientIdx) {
     SOCKET sock = g_clients[clientIdx]; if (sock == 0) return;
     DWORD nowTick = GetTickCount();
-    if (g_pendingFlag[clientIdx] == 1) {
-        DWORD since = g_pendingSince[clientIdx];
-        if (nowTick - since >= APPEND_DELAY_MS) { CommitPendingEntry(clientIdx); g_clientLastTick[clientIdx] = GetTickCount(); }
-    }
     DWORD lastTick = g_clientLastTick[clientIdx]; DWORD timeoutVal = g_clientTimeout[clientIdx];
     if (nowTick - lastTick >= timeoutVal) { printf(szTimeoutFmt, (unsigned)sock); RemoveClient(clientIdx); }
 }
@@ -1361,8 +1339,7 @@ static void ServerStart(void) {
     StartTelnetServer(); StartHttpServer(); StartDicomServer();
     g_bRunning = 1;
     
-    HMENU hSubMenu = GetSubMenu(g_hMenu, 0);
-    ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING | MF_CHECKED, ID_TRAY_TOGGLE, szMenuStop);
+    ModifyMenu(g_hMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING | MF_CHECKED, ID_TRAY_TOGGLE, szMenuStop);
     
     Shell_NotifyIcon(NIM_MODIFY, &nid);
     printf("%s", szServerStarted);
@@ -1376,8 +1353,7 @@ static void ServerStop(void) {
     if (g_listenSocketDicom != INVALID_SOCKET) { closesocket(g_listenSocketDicom); g_listenSocketDicom = INVALID_SOCKET; }
     g_bRunning = 0;
     
-    HMENU hSubMenu = GetSubMenu(g_hMenu, 0);
-    ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING, ID_TRAY_TOGGLE, szMenuStart);
+    ModifyMenu(g_hMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING | MF_UNCHECKED, ID_TRAY_TOGGLE, szMenuStart);
     printf("%s", szServerStopped);
 }
 
@@ -1393,90 +1369,124 @@ static void ServerLoop(void) {
 }
 
 /* ===== Settings Dialog Handler ===== */
-static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+static BOOL CALLBACK SetFontProc(HWND hChild, LPARAM lParam) {
+    SendMessage(hChild, WM_SETFONT, (WPARAM)lParam, TRUE);
+    return TRUE;
+}
+
+static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-        case WM_INITDIALOG:
-            SetDlgItemText(hDlg, ID_EDT_AET, g_aeCalled);
+        case WM_CREATE: {
+            int y = 20; int x = 10;
+            CreateWindow("STATIC", "AET Title:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", g_aeCalled, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, hWnd, (HMENU)ID_EDT_AET, g_hInstance, NULL);
+            y += 30;
+            
             char buf[32];
             snprintf(buf, sizeof(buf), "%d", g_TelnetPort);
-            SetDlgItemText(hDlg, ID_EDT_TELNET, buf);
+            CreateWindow("STATIC", "Telnet Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_TELNET, g_hInstance, NULL);
+            y += 30;
+            
             snprintf(buf, sizeof(buf), "%d", g_HttpPort);
-            SetDlgItemText(hDlg, ID_EDT_HTTP, buf);
+            CreateWindow("STATIC", "HTTP Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_HTTP, g_hInstance, NULL);
+            y += 30;
+            
             snprintf(buf, sizeof(buf), "%d", g_DicomPort);
-            SetDlgItemText(hDlg, ID_EDT_DICOM, buf);
+            CreateWindow("STATIC", "DICOM Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_DICOM, g_hInstance, NULL);
+            y += 30;
+            
             snprintf(buf, sizeof(buf), "%d", g_TelnetTimeout);
-            SetDlgItemText(hDlg, ID_EDT_TIMEOUT, buf);
-            CheckDlgButton(hDlg, ID_CHK_DEBUG, g_DebugLog ? BST_CHECKED : BST_UNCHECKED);
+            CreateWindow("STATIC", "Timeout (sec):", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_TIMEOUT, g_hInstance, NULL);
+            y += 30;
             
-            HBRUSH hBrush = CreateSolidBrush(g_bRunning ? RGB(0, 200, 0) : RGB(200, 200, 200));
-            SetWindowLongPtr(hDlg, DWLP_USER, (LONG_PTR)hBrush);
-            return TRUE;
+            HWND hChk = CreateWindow("BUTTON", "Enable Debug Log", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x, y, 150, 20, hWnd, (HMENU)ID_CHK_DEBUG, g_hInstance, NULL);
+            SendMessage(hChk, BM_SETCHECK, g_DebugLog ? BST_CHECKED : BST_UNCHECKED, 0);
+            y += 30;
             
-        case WM_CTLCOLORSTATIC: {
-            HDC hdcStatic = (HDC)wParam;
-            SetTextColor(hdcStatic, RGB(0, 0, 0));
-            SetBkColor(hdcStatic, RGB(255, 255, 255));
-            HBRUSH hBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
-            if (hBrush) return (INT_PTR)hBrush;
-            return (INT_PTR)CreateSolidBrush(RGB(255, 255, 255));
+            CreateWindow("BUTTON", g_bRunning ? "Stop Server" : "Start Server", BS_OWNERDRAW | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 50, y, 240, 35, hWnd, (HMENU)ID_BTN_STARTSTOP, g_hInstance, NULL);
+            y += 45;
+            
+            CreateWindow("BUTTON", "OK", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 10, y, 80, 25, hWnd, (HMENU)ID_OK, g_hInstance, NULL);
+            CreateWindow("BUTTON", "Cancel", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 100, y, 80, 25, hWnd, (HMENU)IDCANCEL, g_hInstance, NULL);
+            
+            EnumChildWindows(hWnd, SetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
+            return 0;
         }
-        
-        case WM_COMMAND:
-            switch (LOWORD(wParam)) {
-                case ID_BTN_STARTSTOP:
-                    if (g_bRunning) {
-                        ServerStop();
-                        SetWindowText((HWND)lParam, "Start Server");
-                        HBRUSH oldBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
-                        DeleteObject(oldBrush);
-                        HBRUSH hBrush = CreateSolidBrush(RGB(200, 200, 200));
-                        SetWindowLongPtr(hDlg, DWLP_USER, (LONG_PTR)hBrush);
-                    } else {
-                        ServerStart();
-                        SetWindowText((HWND)lParam, "Stop Server");
-                        HBRUSH oldBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
-                        DeleteObject(oldBrush);
-                        HBRUSH hBrush = CreateSolidBrush(RGB(0, 200, 0));
-                        SetWindowLongPtr(hDlg, DWLP_USER, (LONG_PTR)hBrush);
-                    }
-                    HMENU hSubMenu = GetSubMenu(g_hMenu, 0);
-                    if (g_bRunning)
-                        ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING | MF_CHECKED, ID_TRAY_TOGGLE, szMenuStop);
-                    else
-                        ModifyMenu(hSubMenu, ID_TRAY_TOGGLE, MF_BYCOMMAND | MF_STRING, ID_TRAY_TOGGLE, szMenuStart);
-                    break;
-                    
-                case ID_OK: {
-                    GetDlgItemText(hDlg, ID_EDT_AET, g_aeCalled, sizeof(g_aeCalled));
-                    g_aeCalled[16] = '\0';
-                    
-                    g_TelnetPort = GetDlgItemInt(hDlg, ID_EDT_TELNET, NULL, FALSE);
-                    g_HttpPort = GetDlgItemInt(hDlg, ID_EDT_HTTP, NULL, FALSE);
-                    g_DicomPort = GetDlgItemInt(hDlg, ID_EDT_DICOM, NULL, FALSE);
-                    g_TelnetTimeout = GetDlgItemInt(hDlg, ID_EDT_TIMEOUT, NULL, FALSE);
-                    g_DebugLog = IsDlgButtonChecked(hDlg, ID_CHK_DEBUG) == BST_CHECKED;
-                    
-                    SaveConfig();
-                    EndDialog(hDlg, IDOK);
-                    break;
+        case WM_DRAWITEM: {
+            LPDRAWITEMSTRUCT lpdis = (LPDRAWITEMSTRUCT)lParam;
+            if (lpdis->CtlID == ID_BTN_STARTSTOP) {
+                HBRUSH hBrush = CreateSolidBrush(g_bRunning ? RGB(200, 255, 200) : RGB(255, 200, 200));
+                FillRect(lpdis->hDC, &lpdis->rcItem, hBrush);
+                DeleteObject(hBrush);
+                
+                DrawEdge(lpdis->hDC, &lpdis->rcItem, (lpdis->itemState & ODS_SELECTED) ? EDGE_SUNKEN : EDGE_RAISED, BF_RECT);
+                
+                SetBkMode(lpdis->hDC, TRANSPARENT);
+                SetTextColor(lpdis->hDC, RGB(0, 0, 0));
+                
+                char szText[64];
+                GetWindowText(lpdis->hwndItem, szText, sizeof(szText));
+                DrawText(lpdis->hDC, szText, -1, &lpdis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                if (lpdis->itemState & ODS_FOCUS) {
+                    RECT rcFocus = lpdis->rcItem;
+                    InflateRect(&rcFocus, -3, -3);
+                    DrawFocusRect(lpdis->hDC, &rcFocus);
                 }
-                case IDCANCEL:
-                    EndDialog(hDlg, IDCANCEL);
-                    break;
+                return TRUE;
             }
-            return TRUE;
-            
-        case WM_CLOSE:
-            EndDialog(hDlg, IDCANCEL);
-            return TRUE;
-            
-        case WM_DESTROY: {
-            HBRUSH hBrush = (HBRUSH)GetWindowLongPtr(hDlg, DWLP_USER);
-            if (hBrush) DeleteObject(hBrush);
             break;
         }
+        case WM_CTLCOLORSTATIC: {
+            HDC hdcStatic = (HDC)wParam;
+            SetBkMode(hdcStatic, TRANSPARENT);
+            return (LRESULT)GetStockObject(WHITE_BRUSH);
+        }
+        case WM_COMMAND: {
+            if (lParam && HIWORD(wParam) == BN_CLICKED) {
+                int id = LOWORD(wParam);
+                if (id == ID_BTN_STARTSTOP) {
+                    if (g_bRunning) { 
+                        ServerStop(); 
+                        SetWindowText((HWND)lParam, "Start Server"); 
+                    } else { 
+                        ServerStart(); 
+                        SetWindowText((HWND)lParam, "Stop Server"); 
+                    }
+                    InvalidateRect((HWND)lParam, NULL, TRUE);
+                }
+                else if (id == ID_CHK_DEBUG) {
+                    LRESULT chk = SendMessage((HWND)lParam, BM_GETCHECK, 0, 0);
+                    SendMessage((HWND)lParam, BM_SETCHECK, chk == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
+                }
+                else if (id == ID_OK) {
+                    GetDlgItemText(hWnd, ID_EDT_AET, g_aeCalled, sizeof(g_aeCalled)); g_aeCalled[16] = '\0';
+                    
+                    BOOL trans;
+                    int tp = GetDlgItemInt(hWnd, ID_EDT_TELNET, &trans, FALSE); if (trans) g_TelnetPort = tp;
+                    int hp = GetDlgItemInt(hWnd, ID_EDT_HTTP, &trans, FALSE); if (trans) g_HttpPort = hp;
+                    int dp = GetDlgItemInt(hWnd, ID_EDT_DICOM, &trans, FALSE); if (trans) g_DicomPort = dp;
+                    int to = GetDlgItemInt(hWnd, ID_EDT_TIMEOUT, &trans, FALSE); if (trans) g_TelnetTimeout = to;
+                    g_DebugLog = (SendMessage(GetDlgItem(hWnd, ID_CHK_DEBUG), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    
+                    SaveConfig();
+                    DestroyWindow(hWnd);
+                }
+                else if (id == IDCANCEL) {
+                    DestroyWindow(hWnd);
+                }
+            }
+            return 0;
+        }
+        case WM_DESTROY: {
+            g_hSettingsDlg = NULL;
+            return 0;
+        }
     }
-    return FALSE;
+    return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
 static void ShowSettingsDialog(void) {
@@ -1493,54 +1503,25 @@ static void ShowSettingsDialog(void) {
     int left = rc.left + (rc.right - rc.left - width) / 2;
     int top = rc.top + (rc.bottom - rc.top - height) / 2;
     
+    static int classRegistered = 0;
+    if (!classRegistered) {
+        WNDCLASSEX wc = {0};
+        wc.cbSize = sizeof(WNDCLASSEX);
+        wc.lpfnWndProc = SettingsWndProc;
+        wc.hInstance = g_hInstance;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "SettingsWndClass";
+        RegisterClassEx(&wc);
+        classRegistered = 1;
+    }
+    
     g_hSettingsDlg = CreateWindowEx(
-        0, "#32770", "Server Settings",
+        0, "SettingsWndClass", "Server Settings",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         left, top, width, height,
         hParent, NULL, g_hInstance, NULL
     );
-    
-    if (!g_hSettingsDlg) return;
-    
-    int y = 20;
-    int x = 10;
-    
-    CreateWindow("STATIC", "AET Title:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
-    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, g_hSettingsDlg, (HMENU)ID_EDT_AET, g_hInstance, NULL);
-    y += 30;
-    
-    CreateWindow("STATIC", "Telnet Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
-    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_TELNET, g_hInstance, NULL);
-    y += 30;
-    
-    CreateWindow("STATIC", "HTTP Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
-    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_HTTP, g_hInstance, NULL);
-    y += 30;
-    
-    CreateWindow("STATIC", "DICOM Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
-    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_DICOM, g_hInstance, NULL);
-    y += 30;
-    
-    CreateWindow("STATIC", "Timeout (sec):", WS_CHILD | WS_VISIBLE, x, y, 80, 20, g_hSettingsDlg, NULL, g_hInstance, NULL);
-    CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, g_hSettingsDlg, (HMENU)ID_EDT_TIMEOUT, g_hInstance, NULL);
-    y += 30;
-    
-    CreateWindow("BUTTON", "Enable Debug Log", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x, y, 150, 20, g_hSettingsDlg, (HMENU)ID_CHK_DEBUG, g_hInstance, NULL);
-    y += 30;
-    
-    /* Widened Start/Stop server button from 170 to 240, placed effectively */
-    CreateWindow("BUTTON", g_bRunning ? "Stop Server" : "Start Server", 
-                 BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 
-                 x + 50, y, 240, 35, g_hSettingsDlg, (HMENU)ID_BTN_STARTSTOP, g_hInstance, NULL);
-    y += 45;
-    
-    CreateWindow("BUTTON", "OK", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 
-                 x + 10, y, 80, 25, g_hSettingsDlg, (HMENU)ID_OK, g_hInstance, NULL);
-    CreateWindow("BUTTON", "Cancel", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 
-                 x + 100, y, 80, 25, g_hSettingsDlg, (HMENU)IDCANCEL, g_hInstance, NULL);
-    
-    ShowWindow(g_hSettingsDlg, SW_SHOW);
-    SetForegroundWindow(g_hSettingsDlg);
 }
 
 /* ===== Win32 UI ===== */
@@ -1570,12 +1551,9 @@ static void CreateTray(void) {
     wc.hIcon = LoadIcon(NULL, IDI_APPLICATION); wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.lpszClassName = szWndClass;
     RegisterClassEx(&wc);
     g_hMainWnd = CreateWindowEx(0, szWndClass, szTrayTip, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, HWND_MESSAGE, NULL, g_hInstance, NULL);
+    
     g_hMenu = CreatePopupMenu();
-    
-    HMENU hSubMenu = CreatePopupMenu();
-    AppendMenu(hSubMenu, MF_STRING, ID_TRAY_TOGGLE, g_bRunning ? szMenuStop : szMenuStart);
-    AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hSubMenu, szMenuStart);
-    
+    AppendMenu(g_hMenu, MF_STRING | (g_bRunning ? MF_CHECKED : MF_UNCHECKED), ID_TRAY_TOGGLE, g_bRunning ? szMenuStop : szMenuStart);
     AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(g_hMenu, MF_STRING, ID_TRAY_SETTINGS, szMenuSettings);
     AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
@@ -1603,12 +1581,12 @@ int main(int argc, char *argv[]) {
     InitializeCriticalSection(&g_procCodesLock);
     InitArrays(); 
     WSAStartup(MAKEWORD(2, 2), &wsaData); 
-    ;EnsureCsvInitialized(); 
-            EnterCriticalSection(&g_csvLock);
-            strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1);
-            g_csvData[0][LINE_SIZE - 1] = '\0';
-            g_csvRows = 1;
-            LeaveCriticalSection(&g_csvLock);
+    EnsureCsvInitialized(); 
+    EnterCriticalSection(&g_csvLock);
+    strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1);
+    g_csvData[0][LINE_SIZE - 1] = '\0';
+    g_csvRows = 1;
+    LeaveCriticalSection(&g_csvLock);
     LoadProcedureCodes();
     CreateTray(); 
     ServerStart();
