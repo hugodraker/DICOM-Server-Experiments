@@ -1,0 +1,300 @@
+ID,ProcedureCode,Modality,Name
+100001,X101A,US,Obs Multiple Gestation
+100002,X102A,US,Abdomen Complete
+100003,X103A,US,Pelvis Female Complete
+100004,X104A,US,Transvaginal Ultrasound
+100005,X105A,US,Transrectal Ultrasound
+100007,X107A,US,Muscle Study
+100008,X108A,US,Testes and Scrotum
+100009,X109A,US,Hernia Assessment
+100010,X110A,US,Breast or Axilla Female
+100011,X111A,US,Carotid Doppler
+100012,X112A,US,Obs Under 16 Weeks
+100013,X113A,US,Obs Over 16 Weeks
+100014,X114A,US,Obs High Risk
+100015,X115A,US,Limited Pregnancy
+100016,X116A,US,Injection Guidance
+100017,X117A,US,Upper Extremity Soft Tissue
+100018,X118A,US,Elbow Soft Tissue
+100019,X119A,US,Shoulder Soft Tissue
+100020,X120A,US,Hip Soft Tissue
+100021,X121A,US,Hamstring or Thigh Soft Tissue
+100022,X122A,US,Knee Soft Tissue
+100023,X123A,US,Foot or Ankle Soft Tissue
+100024,X124A,US,Upper Limb Arterial Doppler
+100025,X125A,US,Lower Limb Arterial Doppler
+100026,X126A,US,Lower Limb Venous Doppler Bilateral
+100027,X127A,US,Lower Extremity Soft Tissue
+100028,X128A,US,Follicle Monitoring
+100029,X129A,US,Sonohysterogram
+100030,X130A,CR,Mastoids
+100031,X131A,CR,Facial Bones
+100032,X132A,CR,Mandible
+100033,X133A,CR,TM Joints
+100034,X134A,CR,Chest PA and Lateral
+100035,X135A,CR,Sternum
+100036,X136A,CR,Sacrum and Coccyx
+100037,X137A,CR,Metastatic Series
+100038,X138A,CR,Bone Age
+100039,X139A,CR,Shoulder 3 Views
+100040,X140A,CR,Clavicle
+100041,X141A,CR,AC Joints Bilateral
+100042,X142A,CR,Scapula
+100043,X143A,CR,Humerus
+100044,X144A,CR,Forearm
+100045,X145A,CR,Hip Unilateral
+100046,X146A,CR,Femur
+100047,X147A,CR,Tibia and Fibula
+100048,X148A,CR,Toes
+100049,X149A,CR,Sacroiliac Joints
+100050,X150A,CR,Pelvis
+100051,X151A,CR,Soft Tissue Neck
+100052,X152A,CR,Chest 3 Views
+100053,X153A,CR,Arthritic Series
+100054,X154A,CR,Abdomen KUB
+100055,X155A,CR,Acute Abdomen
+100056,X156A,CR,Skull 5 Views
+100057,X157A,CR,Nose
+100058,X158A,CR,Chest PA
+100059,X159A,CR,Ribs
+100060,X160A,CR,Cervical Spine 2–3 Views
+100061,X161A,CR,Cervical Spine 6+ Views
+100062,X162A,CR,Thoracic Spine 2 Views
+100063,X163A,CR,Thoracic Spine 3+ Views
+100064,X164A,CR,Lumbar Spine 2–3 Views
+100065,X165A,CR,Lumbar Spine 4–5 Views
+100066,X166A,CR,Lumbar Spine and Sacrum
+100067,X167A,CR,Elbow 2 Views
+100068,X168A,CR,Elbow 3–4 Views
+100069,X169A,CR,Wrist 2–3 Views
+100070,X170A,CR,Hand 4+ Views
+100071,X171A,CR,Hand 2–3 Views
+100072,X172A,CR,Hand and Wrist 2–3 Views
+100073,X173A,CR,Hand and Wrist 4+ Views
+100074,X174A,CR,Digits 3+ Views
+100075,X175A,CR,Knee 2 Views
+100076,X176A,CR,Knee 3–4 Views
+100077,X177A,CR,Knee 5+ Views
+100078,X178A,CR,Ankle 2–3 Views
+100079,X179A,CR,Ankle 4+ Views
+100080,X180A,CR,Foot 2–3 Views
+100081,X181A,CR,Foot 4+ Views
+100082,X182A,CR,Calcaneus
+100083,X183A,CR,Eye Foreign Body
+100084,X184A,CR,Optic Foramina
+100085,X185A,BMD,BMD Low Risk 2+ Sites
+100086,X186A,BMD,BMD Baseline 2+ Sites
+100087,X187A,BMD,BMD High Risk 2+ Sites
+100088,X188A,MAM,Additional Mammography Views
+100089,X189A,MAM,Implant Mammography Views
+100090,X190A,US,Upper Limb Venous Doppler
+100091,X191A,CR,Pelvis and Both Hips
+100092,X192A,US,Consultation
+100093,X193A,CR,Foot 1 View
+100094,X194A,US,Thyroid or Neck
+100095,X195A,CR,Sacroiliac Joints 4 Views
+100096,X196A,CR,Skull 4 Views
+100097,X197A,CR,Cervical Spine 4–5 Views
+100098,X198A,CR,Pelvis or Hip 2 Views
+100099,X199A,CR,Shoulder 2 Views
+100100,X200A,CR,Scoliosis Series
+100101,X201A,CR,SC Joints 2–3 Views
+100102,X202A,BMD,BMD Low Risk Follow-Up
+100103,X203A,CR,Adenoids
+100104,X204A,CR,Sacrum and Coccyx 2 Views
+100105,X205A,MAM,Unilateral Diagnostic Mammogram
+100106,X206A,MAM,Bilateral Diagnostic Mammogram
+100107,X207A,MAM,Minor Assessment
+100108,X208A,CR,Consultation
+100109,X209A,BMD,Consultation
+100110,X210A,MAM,Consultation
+100111,X211A,BMD,3 Year Follow-Up
+100112,X212A,BMD,Baseline Test Single Site
+100113,X213A,BMD,High Risk Follow-Up Single Site
+100114,X214A,MAM,Bilateral Mammogram with Implant Views
+100115,X215A,CR,Pelvis 2 Views
+100116,X216A,CR,Elbow 5+ Views
+100117,X217A,CR,Scoliosis 4 Views
+100118,X218A,CR,Mobile Fee
+100119,X219A,US,Lower Limb Venous Doppler Unilateral
+100120,X220A,CR,Sinuses 3 Views
+100121,X221A,CR,Mastoids
+100122,X222A,CR,Facial Bones 3+ Views
+100123,X223A,CR,Mandible 4+ Views
+100124,X224A,CR,TM Joints
+100125,X225A,CR,Chest 2 Views
+100126,X226A,CR,Chest Visa
+100127,X227A,CR,Sternum 2+ Views
+100128,X228A,CR,Sacrum and Coccyx 3+ Views
+100129,X229A,CR,Metastatic Series
+100130,X230A,CR,Bone Age
+100131,X231A,CR,Shoulder 3 Views
+100132,X232A,CR,Clavicle 2 Views
+100133,X233A,CR,AC Joints 2 Views
+100134,X234A,CR,Scapula 2 Views
+100135,X235A,CR,Humerus 2 Views
+100136,X236A,CR,Forearm 2 Views
+100137,X237A,CR,Hip 2 Views
+100138,X238A,CR,Femur 2 Views
+100139,X239A,CR,Tibia and Fibula 2 Views
+100140,X240A,CR,Toes 3 Views
+100141,X241A,CR,Sacroiliac Joints 2–3 Views
+100142,X242A,CR,Pelvis 1 View
+100143,X243A,CR,Soft Tissue Neck 2 Views
+100144,X244A,CR,Chest 3+ Views
+100145,X245A,CR,Arthritic Series
+100146,X246A,CR,Abdomen 1 View
+100147,X247A,CR,Abdomen 2+ Views
+100148,X248A,CR,Skull 5+ Views
+100149,X249A,CR,Nose 2+ Views
+100150,X250A,CR,Chest 1 View
+100151,X251A,CR,Ribs 2+ Views
+100152,X252A,CR,Cervical Spine 2–3 Views
+100153,X253A,CR,Cervical Spine 6+ Views
+100154,X254A,CR,Thoracic Spine 2 Views
+100155,X255A,CR,Thoracic Spine 3 Views
+100156,X256A,CR,Lumbar Spine 2–3 Views
+100157,X257A,CR,Lumbar Spine 4–5 Views
+100158,X258A,CR,Lumbar Spine and Sacrum 6+ Views
+100159,X259A,CR,Elbow 2 Views
+100160,X260A,CR,Elbow 3–4 Views
+100161,X261A,CR,Wrist 2–3 Views
+100162,X262A,CR,Wrist 4 Views
+100163,X263A,CR,Hand 2–3 Views
+100164,X264A,CR,Wrist and Hand 2–3 Views
+100165,X265A,CR,Wrist and Hand 4 Views
+100166,X266A,CR,Thumb 3+ Views
+100167,X267A,CR,Index Finger 3+ Views
+100168,X268A,CR,Middle Finger 3+ Views
+100169,X269A,CR,Ring Finger 3+ Views
+100170,X270A,CR,Little Finger 3+ Views
+100171,X271A,CR,Knee 2 Views
+100172,X272A,CR,Knee 3–4 Views
+100173,X273A,CR,Knee 5 Views
+100174,X274A,CR,Ankle 2–3 Views
+100175,X275A,CR,Ankle 4 Views
+100176,X276A,CR,Foot 2–3 Views
+100177,X277A,CR,Foot 4 Views
+100178,X278A,CR,Calcaneus 2 Views
+100179,X279A,CR,Eye Foreign Body 3 Views
+100180,X280A,CR,Optic Foramina 4 Views
+100181,X281A,CR,Pelvis and Both Hips 2 Views
+100182,X282A,CR,Foot 1 View
+100183,X283A,CR,SC Joints 4 Views
+100184,X284A,CR,Skull 4 Views
+100185,X285A,CR,Cervical Spine 4–5 Views
+100186,X286A,CR,Pelvis and Left Hip 2 Views
+100187,X287A,CR,Pelvis and Right Hip 2 Views
+100188,X288A,CR,Shoulder 2 Views
+100189,X289A,CR,Scoliosis Series
+100190,X290A,CR,Sternoclavicular Joints
+100191,X291A,CR,Adenoids 1 View
+100192,X292A,CR,Sacrum and Coccyx 2 Views
+100193,X293A,CR,Minor Assessment
+100194,X294A,CR,Consultation
+100195,X295A,CR,Sinuses Reduced Views
+100196,X296A,CR,Sinuses 2 Views
+100197,X297A,CR,Pelvis 2 Views
+100198,X298A,CR,Pelvis and Both Hips 3 Views
+100199,X299A,CR,Elbow 5 Views
+100200,X300A,CR,Scoliosis 4 Views
+100201,X301A,CR,Scoliosis Series
+100202,X302A,CR,Ribs Study
+100203,X303A,CR,Toe Study
+100204,X304A,CR,Toe Study With Report
+100205,X305A,US,Urinary Tract Male
+100206,X306A,US,Urinary Tract Female
+100207,X307A,US,Thorax Ultrasound
+100208,X308A,US,Obs Screening Bilateral
+100209,X309A,US,Testicular and Arterial Doppler
+100210,X310A,US,Soft Tissue Non‑Extremity
+100211,X311A,US,Soft Tissue Extremity
+100212,X312A,US,Abdomen Limited
+100213,X313A,US,Pelvis Limited
+100214,X314A,CR,Mandible 3 Views
+100215,X315A,CR,Orbits
+100216,X316A,CR,Orbits Pre‑MRI
+100217,X317A,CR,Abdomen and Chest
+100218,X318A,CR,Wrist 4+ Views
+100219,X319A,US,Head or Face Ultrasound
+100220,X320A,CR,Chiro Cervical Spine 2–3 Views
+100221,X321A,CR,Chiro Cervical Spine 4–5 Views
+100222,X322A,CR,Chiro Thoracic Spine 2–3 Views
+100223,X323A,CR,Chiro Thoracic Spine 3–4 Views
+100224,X324A,CR,Chiro Lumbar Spine 2–3 Views
+100225,X325A,CR,Chiro Lumbar Spine 4–5 Views
+100226,X326A,CR,Chiro Pelvis and Both Hips
+100227,X327A,CR,Chiro Scoliosis Series
+100228,X328A,CR,Chiro Sacrum or Coccyx 2 Views
+100229,X329A,CR,Chiro Sacrum and Coccyx 3+ Views
+100230,X330A,CR,Chiro Sacroiliac Joints 2+ Views
+100231,X331A,CR,Chiro Sacroiliac Joints 3+ Views
+100232,X332A,CR,Chiro Pelvis and Hip 1 View
+100233,X333A,CR,Chiro Pelvis and Hips
+100234,X334A,CR,Chiro Clavicle 2 Views
+100235,X335A,CR,Chiro Clavicle 3+ Views
+100236,X336A,CR,Chiro AC Joints 2 Views
+100237,X337A,CR,Chiro AC Joints 3+ Views
+100238,X338A,CR,Chiro Sternoclavicular Joints
+100239,X339A,CR,Chiro Sternoclavicular Joints 4+ Views
+100240,X340A,CR,Chiro Shoulder 2 Views
+100241,X341A,CR,Chiro Shoulder 3+ Views
+100242,X342A,CR,Chiro Scapula 2 Views
+100243,X343A,CR,Chiro Scapula 3+ Views
+100244,X344A,CR,Chiro Humerus 2 Views
+100245,X345A,CR,Chiro Humerus 3+ Views
+100246,X346A,CR,Chiro Elbow 2 Views
+100247,X347A,CR,Chiro Elbow 3+ Views
+100248,X348A,CR,Chiro Elbow 5+ Views
+100249,X349A,CR,Chiro Forearm 2 Views
+100250,X350A,CR,Chiro Forearm 3+ Views
+100251,X351A,CR,Chiro Wrist 2–3 Views
+100252,X352A,CR,Chiro Wrist 4+ Views
+100253,X353A,CR,Chiro Hand 2–3 Views
+100254,X354A,CR,Chiro Hand 4+ Views
+100255,X355A,CR,Chiro Wrist and Hand 2–3 Views
+100256,X356A,CR,Chiro Wrist and Hand 4–5 Views
+100257,X357A,CR,Chiro Femur 2 Views
+100258,X358A,CR,Chiro Femur 3+ Views
+100259,X359A,CR,Chiro Knee 2 Views
+100260,X360A,CR,Chiro Knee 5+ Views
+100261,X361A,CR,Chiro Tibia and Fibula 2 Views
+100262,X362A,CR,Chiro Tibia and Fibula 3+ Views
+100263,X363A,CR,Chiro Ankle 2–3 Views
+100264,X364A,CR,Chiro Ankle 4+ Views
+100265,X365A,CR,Chiro Calcaneus 2 Views
+100266,X366A,CR,Chiro Calcaneus 3+ Views
+100267,X367A,CR,Chiro Foot 2–3 Views
+100268,X368A,CR,Chiro Foot 4+ Views
+100269,X369A,CR,Chiro Skeletal Survey
+100270,X370A,CR,Chiro Knee 3+ Views
+100271,X371A,CR,Chiro Ribs
+100272,X372A,CR,Chiro Toe Study
+100273,X373A,CR,Chiro Toe Study With Report
+100274,X374A,US,Pelvic Male Complete
+100275,X375A,US,Bilateral Breast Ultrasound
+100276,X376A,CR,Chiro Ribs Study
+100277,X377A,CR,Chiro Cervical Spine With Report
+100278,X378A,CR,Chiro Cervical Spine 4–5 Views With Report
+100279,X379A,CR,Chiro Thoracic Spine With Report
+100280,X380A,CR,Chiro Thoracic Spine 3–4 Views With Report
+100281,X381A,CR,Chiro Lumbar Spine With Report
+100282,X382A,CR,Chiro Lumbar Spine 4–5 Views With Report
+100283,X383A,CR,Chiro Pelvis and Both Hips With Report
+100284,X384A,CR,Chiro Scoliosis Series With Report
+100285,X385A,CR,Chiro Sacrum or Coccyx With Report
+100286,X386A,CR,Chiro Sacrum and Coccyx With Report
+100287,X387A,CR,Chiro Sacroiliac Joints With Report
+100288,X388A,CR,Chiro Sacroiliac Joints 3+ Views With Report
+100289,X389A,CR,Chiro Pelvis and Hip With Report
+100290,X390A,CR,Chiro Pelvis and Hips With Report
+100291,X391A,CR,Chiro Clavicle With Report
+100292,X392A,CR,Chiro Clavicle 3+ Views With Report
+100293,X393A,CR,Chiro AC Joints With Report
+100294,X394A,CR,Chiro AC Joints 3+ Views With Report
+100295,X395A,CR,Chiro Sternoclavicular Joints With Report
+100296,X396A,CR,Chiro Sternoclavicular Joints 4+ Views With Report
+100297,X397A,CR,Chiro Shoulder With Report
+100298,X398A,CR,Chiro Shoulder 3+ Views With Report
+100299,X399A,CR,Chiro Scapula With Report
+100300,X400A,CR,Chiro Scapula 3+ Views With Report
