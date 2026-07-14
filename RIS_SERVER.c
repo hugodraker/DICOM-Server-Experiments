@@ -28,15 +28,15 @@
 #pragma comment(lib, "kernel32.lib")
 
 #define ID_OK IDOK
-#define MAX_CLIENTS          32
-#define RECV_SIZE           2048
-#define CLIENT_BUF_SIZE     8192
+#define MAX_CLIENTS          64
+#define RECV_SIZE           8192
+#define CLIENT_BUF_SIZE     16384
 #define FIELD_COUNT         27
-#define FIELD_SIZE          256
+#define FIELD_SIZE          512
 #define ENTRY_SIZE          (FIELD_COUNT * FIELD_SIZE)
-#define LINE_SIZE           16384
-#define MAX_CSV_LINE        2048
-#define BUFFER_SIZE         16384
+#define LINE_SIZE           32768
+#define MAX_CSV_LINE        8192
+#define BUFFER_SIZE         32768
 #define APPEND_DELAY_MS     2000
 #define DEFAULT_TIMEOUT_MS  10000
 #define FIONBIO_VAL         0x8004667E
@@ -63,7 +63,8 @@ static HINSTANCE g_hInstance = NULL;
 static HWND g_hMainWnd = NULL;
 static HWND g_hSettingsDlg = NULL;
 static HMENU g_hMenu = NULL;
-static char g_aeCalled[17] = "AUTOIT_SCP";
+static char g_aeCalled[32] = "AUTOIT_SCP";
+static char g_delPwd[128] = "0";
 static char szIniFile[MAX_PATH];
 static CRITICAL_SECTION g_csvLock;
 static CRITICAL_SECTION g_procCodesLock;
@@ -82,12 +83,12 @@ static char   g_recvBuf[RECV_SIZE];
 static char   g_fileLine[LINE_SIZE];
 static char   g_lineOut[LINE_SIZE];
 static char   g_iniBuf[256];
-static char   g_dispParam[512];
+static char   g_dispParam[1024];
 
 NOTIFYICONDATA nid;
 
 /* In-memory CSV store — no file I/O for patient data */
-#define MAX_CSV_ROWS 1024
+#define MAX_CSV_ROWS 4096
 static char g_csvData[MAX_CSV_ROWS][LINE_SIZE];
 static int  g_csvRows = 0;
 static int  g_csvInitialized = 0;
@@ -95,50 +96,50 @@ static int  g_csvInitialized = 0;
 /* Procedure codes lookup table */
 #define MAX_PROC_CODES 256
 typedef struct {
-    char id[65];
-    char procCode[65];
-    char modality[65];
-    char name[65];
+    char id[128];
+    char procCode[128];
+    char modality[128];
+    char name[128];
 } ProcCodeEntry;
 static ProcCodeEntry g_procCodes[MAX_PROC_CODES];
 static int g_procCodeCount = 0;
 static int g_procCodesLoaded = 0;
 
 typedef struct {
-    char patientName[65];
-    char patientID[65];
-    char dob[65];
-    char sex[65];
-    char reqPhys[65];
-    char reqSvc[65];
-    char procDesc[65];
-    char procReason[65];
-    char accNum[65];
-    char procID[65];
-    char procPri[65];
-    char aeTitle[65];
-    char spsDate[65];
-    char spsTime[65];
-    char perfPhys[65];
-    char spsDesc[65];
-    char spsID[65];
-    char station[65];
-    char loc[65];
-    char status[65];
-    char modality[65];
-    char refPhys[65];
-    char studyDesc[65];
-    char protoCode[65];
-    char protoScheme[65];
-    char protoMeaning[65];
-    char studyUID[65];
+    char patientName[128];
+    char patientID[128];
+    char dob[128];
+    char sex[128];
+    char reqPhys[128];
+    char reqSvc[128];
+    char procDesc[128];
+    char procReason[128];
+    char accNum[128];
+    char procID[128];
+    char procPri[128];
+    char aeTitle[128];
+    char spsDate[128];
+    char spsTime[128];
+    char perfPhys[128];
+    char spsDesc[128];
+    char spsID[128];
+    char station[128];
+    char loc[128];
+    char status[128];
+    char modality[128];
+    char refPhys[128];
+    char studyDesc[128];
+    char protoCode[128];
+    char protoScheme[128];
+    char protoMeaning[128];
+    char studyUID[128];
 } MWLEntry;
 
 static const char *szIniServer = "Server", *szIniAET = "AETitle", *szIniTelnetPort = "TelnetPort";
 static const char *szIniHttpPort = "HttpPort", *szIniDicomPort = "DicomPort";
-static const char *szIniTelnetTimeout = "TelnetTimeout", *szIniDebugLog = "DebugLog";
+static const char *szIniTelnetTimeout = "TelnetTimeout", *szIniDebugLog = "DebugLog", *szIniDelPwd = "DeletePassword";
 static const char *szDefAET = "AUTOIT_SCP", *szDefTelnetPort = "23", *szDefHttpPort = "80";
-static const char *szDefDicomPort = "104", *szDefTelnetTimeout = "10", *szDefDebug = "1";
+static const char *szDefDicomPort = "104", *szDefTelnetTimeout = "10", *szDefDebug = "1", *szDefDelPwd = "0";
 static const char *szWndClass = "WorklistTrayClass", *szTrayTip = "RIS Multi-Protocol Server";
 static const char *szMenuStart = "Start Server", *szMenuStop = "Stop Server", *szMenuShow = "Show Console", *szMenuExit = "Exit";
 static const char *szMenuSettings = "Settings";
@@ -163,18 +164,20 @@ static const char *szHttp200OK = "HTTP/1.1 200 OK\r\nContent-Type: text/html; ch
 static const char *szCSVHeader = "PatientName,PatientID,BirthDate,Sex,ReqPhys,ReqSvc,ProcDesc,Reason,Accession,ProcID,Priority,StationAE,StartDate,StartTime,PerfPhys,SPSDesc,SPSID,StationName,Location,Status,Modality,RefPhys,StudyDesc,ProtoCode,ProtoScheme,ProtoMeaning,StudyUID";
 static const char *szFakePatient = ""; 
 
-static const char *szHtmlForms1 = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
+static const char *szHtmlFormsTop = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
 "<button type='button' onclick='newPatient()' class='top-btn bg-green'>New Patient</button>"
 "<button type='button' onclick='searchPatient()' class='top-btn bg-blue'>Search</button>"
 "<form action='/upload' method='POST' enctype='multipart/form-data' id='uploadForm' style='display:inline-flex; align-items:center; gap:10px; margin:0;'>"
 "<input type='file' name='csvfile' id='csvfile' style='display:none;' onchange='document.getElementById(\"uploadForm\").submit();'>"
 "<label for='csvfile' class='top-btn bg-blue'>Choose File</label>"
 "</form>"
-"<form action='/delete' method='POST' style='margin:0;'>"
-"<input type='submit' value='Delete All Data' class='top-btn bg-red'>"
+"<form action='/delete' method='POST' id='delAllForm' style='margin:0;'>"
+"<input type='hidden' name='pwd' id='delPwd' value=''>"
+"<input type='button' value='Delete All Data' class='top-btn bg-red' onclick='delAll()'>"
 "</form></div><hr>"
-"<form id='manForm'>"
-"<input type='text' name='PatientName' placeholder='Patient Name'> <input type='text' name='PatientID' placeholder='Patient ID'> Birth: <input type='date' name='BirthDate'> <select name='Sex'><option value=''>Sex</option><option value='M'>M</option><option value='F'>F</option><option value='O'>O</option></select><br>"
+"<form id='manForm'>";
+
+static const char *szHtmlFormsInputs = "<input type='text' name='PatientName' placeholder='Patient Name'> <input type='text' name='PatientID' placeholder='Patient ID'> Birth: <input type='date' name='BirthDate'> <select name='Sex'><option value=''>Sex</option><option value='M'>M</option><option value='F'>F</option><option value='O'>O</option></select><br>"
 "<input type='text' name='ReqPhys' placeholder='Req Phys'> <input type='text' name='ReqSvc' placeholder='Req Svc'> <input type='text' name='ProcDesc' placeholder='Proc Desc'> <input type='text' name='Reason' placeholder='Reason'><br>"
 "<input type='text' name='Accession' placeholder='Accession'> <input type='text' name='ProcID' placeholder='Proc ID'> <select name='Priority'><option value='LOW' selected>LOW</option><option value='MEDIUM'>MEDIUM</option><option value='ROUTINE'>ROUTINE</option><option value='HIGH'>HIGH</option></select> <input type='text' name='StationAE' placeholder='Station AE'><br>"
 "Start: <input type='date' name='StartDate'> Time: <input type='time' name='StartTime'> <input type='text' name='PerfPhys' placeholder='Perf Phys'> <input type='text' name='SPSDesc' placeholder='SPS Desc'><br>"
@@ -187,6 +190,7 @@ static const char *szHtmlForms2 = " <select name='Status'><option value='0'>NONE
 "<div style='margin-top:15px; display:flex; gap:10px;'>"
 "<button type='button' onclick='sendMan()' class='top-btn bg-green'>Add/Edit Patient</button> "
 "<button type='button' onclick='nxtA()' class='top-btn bg-blue'>Next Accession</button> "
+"<button type='button' onclick='multiStudy()' class='top-btn bg-blue'>Stub</button> "
 "<button type='button' onclick='delP()' class='top-btn bg-red'>Delete Patient</button></div></form><hr>";
 
 static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title><style>"
@@ -197,21 +201,39 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 "</style>"
 "<script>var fnames=['PatientName','PatientID','BirthDate','Sex','ReqPhys','ReqSvc','ProcDesc','Reason','Accession','ProcID','Priority','StationAE','StartDate','StartTime','PerfPhys','SPSDesc','SPSID','StationName','Location','Status','Modality','RefPhys','StudyDesc','ProtoCode','ProtoScheme','ProtoMeaning','StudyUID'];"
 "function f(r){var c=r.cells;for(var i=0;i<c.length&&i<fnames.length;i++){var e=document.getElementsByName(fnames[i])[0];if(e)e.value=(c[i].innerText||c[i].textContent).trim();}"
-"var sel=document.getElementById('procCodeSel');if(sel){var pid=document.getElementsByName('ProcID')[0].value;sel.value='';for(var j=0;j<sel.options.length;j++){if(sel.options[j].getAttribute('data-id')===pid){sel.selectedIndex=j;break;}}}}"
-"function sendMan(){var a=document.getElementsByName('Accession')[0].value.trim();if(!a){alert('Accession number is required!');return false;}var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}fetch('/manual',{method:'POST',body:c.join(',')}).then(function(){window.location.href='/';});return false;}"
+"var sel=document.getElementById('procCodeSel');if(sel){var pid=document.getElementsByName('ProcID')[0].value;for(var j=0;j<sel.options.length;j++){sel.options[j].selected=(sel.options[j].getAttribute('data-id')===pid);}}}"
+"window.maxAcc=window.maxAcc||0;"
+"function nxtA(){var t=document.getElementById('pTable'),m=0,p='ACC',c=5;if(t){for(var i=1;i<t.rows.length;i++){var v=t.rows[i].cells[8].innerText||'',mt=v.match(/([^0-9]*)([0-9]+)/);if(mt){p=mt[1];var val=parseInt(mt[2],10);if(val>m){m=val;c=mt[2].length;}}}}if(window.maxAcc<=m)window.maxAcc=m;window.maxAcc++;document.getElementsByName('Accession')[0].value=p+String(window.maxAcc).padStart(c,'0');}"
+"function sendMan(){var a=document.getElementsByName('Accession')[0].value.trim();if(!a){alert('Accession number is required!');return false;}"
+"var sel=document.getElementById('procCodeSel');var opts=[];if(sel){for(var j=0;j<sel.options.length;j++){if(sel.options[j].selected&&sel.options[j].value!=='')opts.push(sel.options[j]);}}"
+"if(opts.length>1){var p=[];for(var k=0;k<opts.length;k++){nxtA();"
+"document.getElementsByName('Modality')[0].value=opts[k].getAttribute('data-mod')||'';"
+"document.getElementsByName('ProcDesc')[0].value=opts[k].text||'';"
+"document.getElementsByName('ProcID')[0].value=opts[k].getAttribute('data-id')||'';"
+"document.getElementsByName('SPSID')[0].value=opts[k].getAttribute('data-code')||'';"
+"document.getElementsByName('StationAE')[0].value='';"
+"document.getElementsByName('SPSDesc')[0].value='';"
+"var sn=document.getElementsByName('StationName')[0];if(sn)sn.value='';"
+"document.getElementsByName('Location')[0].value='';"
+"document.getElementsByName('StudyDesc')[0].value='';"
+"var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}"
+"p.push(fetch('/manual',{method:'POST',body:c.join(',')}));}Promise.all(p).then(function(){window.location.href='/';});return false;}"
+"var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}fetch('/manual',{method:'POST',body:c.join(',')}).then(function(){window.location.href='/';});return false;}"
 "function delP(){var a=document.getElementsByName('Accession')[0].value;if(a&&confirm('Delete Patient '+a+'?'))fetch('/delpat',{method:'POST',body:a}).then(function(){window.location.href='/';});}"
+"function delAll(){var p=prompt('Enter password to delete all data:');if(p!==null){document.getElementById('delPwd').value=p;document.getElementById('delAllForm').submit();}}"
+"function multiStudy(){alert('Stub not implemented');}"
 "function sortTable(n){var t,r,sw,i,x,y,sd,d;t=document.getElementById('pTable');sw=true;d='asc';while(sw){sw=false;r=t.rows;for(i=1;i<(r.length-1);i++){sd=false;x=r[i].getElementsByTagName('TD')[n];y=r[i+1].getElementsByTagName('TD')[n];if(d=='asc'){if(x.innerHTML.toLowerCase()>y.innerHTML.toLowerCase()){sd=true;break;}}else{if(x.innerHTML.toLowerCase()<y.innerHTML.toLowerCase()){sd=true;break;}}}if(sd){r[i].parentNode.insertBefore(r[i+1],r[i]);sw=true;}}}"
 "function formatDates(){var t=document.getElementById('pTable');if(!t)return;for(var i=1;i<t.rows.length;i++){var c=t.rows[i].cells;if(c.length>13){"
 "var b=c[2].innerText;if(b.length===8)c[2].innerText=b.substr(0,4)+'-'+b.substr(4,2)+'-'+b.substr(6,2);"
 "var s=c[12].innerText;if(s.length===8)c[12].innerText=s.substr(0,4)+'-'+s.substr(4,2)+'-'+s.substr(6,2);"
 "var tm=c[13].innerText;if(tm.length===6)c[13].innerText=tm.substr(0,2)+':'+tm.substr(2,2);"
 "}}}"
-"function nxtA(){var t=document.getElementById('pTable'),m=0,p='ACC',c=5;if(t){for(var i=1;i<t.rows.length;i++){var v=t.rows[i].cells[8].innerText||'',mt=v.match(/([^0-9]*)([0-9]+)/);if(mt){p=mt[1];var val=parseInt(mt[2],10);if(val>m){m=val;c=mt[2].length;}}}}m++;document.getElementsByName('Accession')[0].value=p+String(m).padStart(c,'0');}"
-"function newPatient(){for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}var stat=document.getElementsByName('Status')[0];if(stat)stat.value='1';var pri=document.getElementsByName('Priority')[0];if(pri)pri.value='LOW';}"
-"function loadProcCode(){var sel=document.getElementById('procCodeSel');if(sel&&sel.selectedIndex>0){var idx=sel.selectedIndex;"
+"function newPatient(){for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}var stat=document.getElementsByName('Status')[0];if(stat)stat.value='1';var pri=document.getElementsByName('Priority')[0];if(pri)pri.value='LOW';var tm=document.getElementsByName('StartTime')[0];if(tm)tm.value='16:00';}"
+"function loadProcCode(){var sel=document.getElementById('procCodeSel');if(sel&&sel.selectedIndex>=0){var idx=sel.selectedIndex;"
 "var id=document.getElementsByName('ProcID')[0];var code=document.getElementsByName('SPSID')[0];var mod=document.getElementsByName('Modality')[0];var desc=document.getElementsByName('ProcDesc')[0];"
-"if(id&&code&&mod&&desc){id.value=sel.options[idx].getAttribute('data-id');code.value=sel.options[idx].getAttribute('data-code');mod.value=sel.options[idx].getAttribute('data-mod');desc.value=sel.options[idx].text;}}"
+"if(id&&code&&mod&&desc){id.value=sel.options[idx].getAttribute('data-id')||'';code.value=sel.options[idx].getAttribute('data-code')||'';mod.value=sel.options[idx].getAttribute('data-mod')||'';desc.value=sel.options[idx].text;}}"
 "}"
+"function filterProcCodes(){var i,f=document.getElementById('procFilter').value.toUpperCase(),s=document.getElementById('procCodeSel'),o=s.options;for(i=1;i<o.length;i++){if((o[i].text||o[i].innerText).toUpperCase().indexOf(f)>-1){o[i].style.display='';}else{o[i].style.display='none';o[i].selected=false;}}}"
 "function searchPatient(){alert('Search not implemented');}"
 "window.onload=function(){newPatient();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
 
@@ -266,20 +288,21 @@ static void FormatPatientName(char *pName) {
     TrimInPlace(pName);
     if (*pName == '\0' || strchr(pName, '^') != NULL) return;
 
-    char temp[256];
+    char temp[512];
     char *comma = strchr(pName, ',');
     if (comma) {
         *comma = '\0';
-        char last[128], rest[128];
-        strncpy(last, pName, 127); last[127] = '\0';
-        strncpy(rest, comma + 1, 127); rest[127] = '\0';
+        char last[256], rest[256];
+        strncpy(last, pName, 255); last[255] = '\0';
+        strncpy(rest, comma + 1, 255); rest[255] = '\0';
         TrimInPlace(last); TrimInPlace(rest);
         
         char *space = strchr(rest, ' ');
         while (space) { *space = '^'; space = strchr(space + 1, ' '); }
         
         snprintf(temp, sizeof(temp), "%s^%s", last, rest);
-        strcpy(pName, temp);
+        strncpy(pName, temp, FIELD_SIZE - 1);
+        pName[FIELD_SIZE - 1] = '\0';
         
         int len = (int)strlen(pName);
         while(len > 0 && pName[len-1] == '^') pName[--len] = '\0';
@@ -291,15 +314,17 @@ static void FormatPatientName(char *pName) {
         if (lastSpace == space1) {
             *space1 = '\0';
             snprintf(temp, sizeof(temp), "%s^%s", space1 + 1, pName);
-            strcpy(pName, temp);
+            strncpy(pName, temp, FIELD_SIZE - 1);
+            pName[FIELD_SIZE - 1] = '\0';
         } else {
             *lastSpace = '\0'; 
-            char last[128]; strncpy(last, lastSpace + 1, 127); last[127] = '\0';
-            char rest[128]; strncpy(rest, pName, 127); rest[127] = '\0';
+            char last[256]; strncpy(last, lastSpace + 1, 255); last[255] = '\0';
+            char rest[256]; strncpy(rest, pName, 255); rest[255] = '\0';
             char *sp = strchr(rest, ' ');
             while(sp) { *sp = '^'; sp = strchr(sp + 1, ' '); }
             snprintf(temp, sizeof(temp), "%s^%s", last, rest);
-            strcpy(pName, temp);
+            strncpy(pName, temp, FIELD_SIZE - 1);
+            pName[FIELD_SIZE - 1] = '\0';
         }
     }
 }
@@ -366,7 +391,7 @@ static void SendText(SOCKET sock, const char *pText) {
 static void CloseHttpClient(int clientIdx) {
     SOCKET sock = g_clients[clientIdx];
     if (sock != 0 && sock != INVALID_SOCKET) {
-        char dumpBuf[1024];
+        char dumpBuf[4096];
         while (recv(sock, dumpBuf, sizeof(dumpBuf), 0) > 0) { }
         shutdown(sock, SD_SEND);
     }
@@ -383,14 +408,17 @@ static void ResolveIniPath(void) {
 }
 
 static void SetAETitle(const char *pSrc) {
-    memset(g_aeCalled, ' ', 16); g_aeCalled[16] = '\0';
-    size_t nLen = strlen(pSrc); if (nLen > 16) nLen = 16;
+    memset(g_aeCalled, ' ', sizeof(g_aeCalled) - 1); g_aeCalled[sizeof(g_aeCalled) - 1] = '\0';
+    size_t nLen = strlen(pSrc); if (nLen > sizeof(g_aeCalled) - 1) nLen = sizeof(g_aeCalled) - 1;
     memcpy(g_aeCalled, pSrc, nLen);
 }
 
 static void LoadConfig(void) {
-    GetPrivateProfileString(szIniServer, szIniAET, szDefAET, g_iniBuf, 256, szIniFile);
+    GetPrivateProfileString(szIniServer, szIniAET, szDefAET, g_iniBuf, sizeof(g_iniBuf), szIniFile);
     SetAETitle(g_iniBuf);
+    
+    GetPrivateProfileString(szIniServer, szIniDelPwd, szDefDelPwd, g_delPwd, sizeof(g_delPwd), szIniFile);
+    TrimInPlace(g_delPwd);
     
     g_TelnetPort = GetPrivateProfileInt(szIniServer, szIniTelnetPort, 23, szIniFile);
     g_HttpPort = GetPrivateProfileInt(szIniServer, szIniHttpPort, 80, szIniFile);
@@ -400,8 +428,9 @@ static void LoadConfig(void) {
 }
 
 static void SaveConfig(void) {
-    char buf[16];
+    char buf[32];
     WritePrivateProfileString(szIniServer, szIniAET, g_aeCalled, szIniFile);
+    WritePrivateProfileString(szIniServer, szIniDelPwd, g_delPwd, szIniFile);
     
     snprintf(buf, sizeof(buf), "%d", g_TelnetPort);
     WritePrivateProfileString(szIniServer, szIniTelnetPort, buf, szIniFile);
@@ -458,7 +487,7 @@ static void BuildCSVLineFromEntry(char *pEntry, char *pOut) {
         if (q) *pCur++ = '"';
         for (const char *s = pField; *s; s++) {
             if (q && *s == '"') *pCur++ = '"';
-            *pCur++ = *s;
+            if (pCur - pOut < LINE_SIZE - 2) *pCur++ = *s;
         }
         if (q) *pCur++ = '"';
     }
@@ -475,7 +504,7 @@ static void EnsureCsvInitialized(void) {
     
     SYSTEMTIME st;
     GetLocalTime(&st);
-    char today[16];
+    char today[32];
     snprintf(today, sizeof(today), "%04d%02d%02d", st.wYear, st.wMonth, st.wDay);
     
     strncpy(GetFieldPtr(entry, 12), today, FIELD_SIZE - 1);
@@ -553,8 +582,8 @@ static void LoadProcedureCodes(void) {
         char *p = line;
         for (int i = 0; i < 4; i++) {
             char *comma = strchr(p, ',');
-            if (comma) { *comma = '\0'; strncpy(fields[i], p, 64); fields[i][64] = '\0'; TrimInPlace(fields[i]); p = comma + 1; }
-            else { strncpy(fields[i], p, 64); fields[i][64] = '\0'; TrimInPlace(fields[i]); break; }
+            if (comma) { *comma = '\0'; strncpy(fields[i], p, 127); fields[i][127] = '\0'; TrimInPlace(fields[i]); p = comma + 1; }
+            else { strncpy(fields[i], p, 127); fields[i][127] = '\0'; TrimInPlace(fields[i]); break; }
         }
         g_procCodeCount++;
     }
@@ -644,8 +673,8 @@ static void parse_csv_line_mwl(char *line, MWLEntry *e) {
     char *start = line;
     for (int i = 0; i < 27; i++) {
         char *end = strchr(start, ',');
-        if (end) { *end = '\0'; strncpy(fields[i], start, 64); fields[i][64] = '\0'; trim_mwl(fields[i]); start = end + 1; }
-        else { strncpy(fields[i], start, 64); fields[i][64] = '\0'; trim_mwl(fields[i]); break; }
+        if (end) { *end = '\0'; strncpy(fields[i], start, 127); fields[i][127] = '\0'; trim_mwl(fields[i]); start = end + 1; }
+        else { strncpy(fields[i], start, 127); fields[i][127] = '\0'; trim_mwl(fields[i]); break; }
     }
 }
 
@@ -738,7 +767,7 @@ static void handle_association_rq(SOCKET clientSocket, char* buffer, int bytesRe
 }
 
 static void handle_c_echo_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id) {
-    uint8_t cmd_buf[256]; int cmd_len = 0;
+    uint8_t cmd_buf[512]; int cmd_len = 0;
     dicom_add_ul(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0000, 0);
     dicom_add_string(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0002, "1.2.840.10008.1.1");
     dicom_add_us(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0100, 0x8030);
@@ -752,10 +781,10 @@ static void handle_c_echo_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
 }
 
 static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id, const uint8_t *req_buf, int req_len) {
-    char qDate[64] = {0};
-    char qTime[64] = {0};
-    char qAET[64] = {0};
-    char qMod[64] = {0};
+    char qDate[128] = {0};
+    char qTime[128] = {0};
+    char qAET[128] = {0};
+    char qMod[128] = {0};
     
     dicom_get_string(req_buf, req_len, 0x0008, 0x0060, qMod);
     dicom_get_string(req_buf, req_len, 0x0040, 0x0001, qAET);
@@ -773,7 +802,7 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             if (qDate[0] != '\0') {
                 char *dash = strchr(qDate, '-');
                 if (dash) {
-                    char d1[16] = {0}, d2[16] = {0};
+                    char d1[32] = {0}, d2[32] = {0};
                     strncpy(d1, qDate, dash - qDate);
                     strcpy(d2, dash + 1);
                     if (d1[0] != '\0' && strcmp(e.spsDate, d1) < 0) continue;
@@ -785,7 +814,7 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             if (qTime[0] != '\0') {
                 char *dash = strchr(qTime, '-');
                 if (dash) {
-                    char t1[16] = {0}, t2[16] = {0};
+                    char t1[32] = {0}, t2[32] = {0};
                     strncpy(t1, qTime, dash - qTime);
                     strcpy(t2, dash + 1);
                     if (t1[0] != '\0' && strcmp(e.spsTime, t1) < 0) continue;
@@ -795,7 +824,7 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
                 }
             }
 
-            uint8_t cmd_buf[256]; int cmd_len = 0;
+            uint8_t cmd_buf[512]; int cmd_len = 0;
             dicom_add_ul(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0000, 0);
             dicom_add_string(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0002, "1.2.840.10008.5.1.4.31");
             dicom_add_us(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0100, 0x8020);
@@ -807,7 +836,7 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
             cmd_buf[10] = (gl >> 16) & 0xFF; cmd_buf[11] = (gl >> 24) & 0xFF;
             send_pdata_tf(clientSocket, pc_id, 0x03, cmd_buf, cmd_len);
             
-            uint8_t data_buf[4096]; int data_len = 0;
+            uint8_t data_buf[8192]; int data_len = 0;
             
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0050, e.accNum);
             dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0090, e.refPhys);
@@ -845,7 +874,7 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
         }
     }
     
-    uint8_t cmd_buf[256]; int cmd_len = 0;
+    uint8_t cmd_buf[512]; int cmd_len = 0;
     dicom_add_ul(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0000, 0);
     dicom_add_string(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0002, "1.2.840.10008.5.1.4.31");
     dicom_add_us(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0100, 0x8020);
@@ -870,9 +899,9 @@ static void handle_pdata_tf(SOCKET clientSocket, char* buffer, int bytesRead) {
     int end = 6 + (int)pdu_len;
     if (end > bytesRead) end = bytesRead;
 
-    static uint8_t g_findCmd[8192];
+    static uint8_t g_findCmd[16384];
     static int     g_findCmdLen = 0;
-    static uint8_t g_findData[8192];
+    static uint8_t g_findData[16384];
     static int     g_findDataLen = 0;
     static uint8_t g_findPcId = 0;
     static uint16_t g_findMsgId = 0;
@@ -997,7 +1026,7 @@ static DWORD WINAPI DicomThread(LPVOID lpParam) { (void)lpParam; DicomNetworkLoo
 static void ExtractDispParam(const char *pLine, char *pOut) {
     const char *si = pLine + 4; while (*si == ' ') si++;
     char *di = pOut;
-    while (*si && *si != '\r' && *si != '\n' && *si != ',') *di++ = *si++;
+    while (*si && *si != '\r' && *si != '\n' && *si != ',' && (di - pOut < 1023)) *di++ = *si++;
     *di = '\0'; TrimInPlace(pOut);
 }
 
@@ -1025,7 +1054,7 @@ static void ProcessDispCommand(int clientIdx, const char *pLine) {
             count++;
         }
     }
-    char resp[64]; snprintf(resp, sizeof(resp), "%d RESULTS\r\n", count);
+    char resp[128]; snprintf(resp, sizeof(resp), "%d RESULTS\r\n", count);
     SendText(g_clients[clientIdx], resp);
 }
 
@@ -1073,13 +1102,13 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 
                 /* Assemble row into line buffer to reduce socket send overhead by 98% */
                 char rowBuf[LINE_SIZE]; rowBuf[0] = '\0';
-                strcat(rowBuf, isHeader ? "<tr>" : "<tr onclick='f(this)' style='cursor:pointer;'>");
+                strncat(rowBuf, isHeader ? "<tr>" : "<tr onclick='f(this)' style='cursor:pointer;'>", LINE_SIZE - strlen(rowBuf) - 1);
                 for (int fi = 0; fi < FIELD_COUNT; fi++) {
-                    strcat(rowBuf, isHeader ? "<th onclick='sortTable(this.cellIndex)'>" : "<td>");
-                    strcat(rowBuf, GetFieldPtr(entry, fi));
-                    strcat(rowBuf, isHeader ? "</th>" : "</td>");
+                    strncat(rowBuf, isHeader ? "<th onclick='sortTable(this.cellIndex)'>" : "<td>", LINE_SIZE - strlen(rowBuf) - 1);
+                    strncat(rowBuf, GetFieldPtr(entry, fi), LINE_SIZE - strlen(rowBuf) - 1);
+                    strncat(rowBuf, isHeader ? "</th>" : "</td>", LINE_SIZE - strlen(rowBuf) - 1);
                 }
-                strcat(rowBuf, "</tr>");
+                strncat(rowBuf, "</tr>", LINE_SIZE - strlen(rowBuf) - 1);
                 SendText(sock, rowBuf);
                 isHeader = 0;
             }
@@ -1087,13 +1116,29 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         }
 
         /* Send forms Part 1 */
-        SendText(sock, szHtmlForms1);
+        SendText(sock, szHtmlFormsTop);
+
+        /* Procedure codes select and filter box */
+        SendText(sock, "<input type='text' id='procFilter' onkeyup='filterProcCodes()' placeholder='Filter procedure codes...' style='width: 600px; display: block; margin-bottom: 5px; padding: 5px;'>");
+        SendText(sock, "<select id='procCodeSel' multiple size='5' onchange=\"loadProcCode()\" style='width: 600px; vertical-align:top; margin-bottom: 15px;'><option value=''>Select Procedure Code</option>");
+        if (g_procCodesLoaded) {
+            for (int i = 0; i < g_procCodeCount; i++) {
+                char opt[1024];
+                snprintf(opt, sizeof(opt), "<option value='%s' data-id='%s' data-code='%s' data-mod='%s'>%s</option>",
+                        g_procCodes[i].id, g_procCodes[i].id, g_procCodes[i].procCode, g_procCodes[i].modality, g_procCodes[i].name);
+                SendText(sock, opt);
+            }
+        }
+        SendText(sock, "</select><br>");
+
+        /* Send Inputs */
+        SendText(sock, szHtmlFormsInputs);
 
         /* Send station rooms dropdowns */
         FILE *fr = fopen("rooms.csv", "r");
         if (fr) {
-            char line[512];
-            char rId[64][32], rLoc[64][64], rMod[64][32], rAe[64][64], rName[64][64], rRoom[64][64];
+            char line[1024];
+            char rId[64][64], rLoc[64][128], rMod[64][64], rAe[64][128], rName[64][128], rRoom[64][128];
             int rCount = 0, isHeader = 1;
             while (fgets(line, sizeof(line), fr) && rCount < 64) {
                 if (isHeader) { isHeader = 0; continue; }
@@ -1109,21 +1154,21 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             }
             fclose(fr);
 
-            char js[4096] = "<script>var rData = [";
+            char js[8192] = "<script>var rData = [";
             for (int i = 0; i < rCount; i++) {
-                char tmp[512]; snprintf(tmp, sizeof(tmp), "{id:'%s',loc:'%s',mod:'%s',ae:'%s',name:'%s',room:'%s'},", rId[i], rLoc[i], rMod[i], rAe[i], rName[i], rRoom[i]); strcat(js, tmp);
+                char tmp[1024]; snprintf(tmp, sizeof(tmp), "{id:'%s',loc:'%s',mod:'%s',ae:'%s',name:'%s',room:'%s'},", rId[i], rLoc[i], rMod[i], rAe[i], rName[i], rRoom[i]); strncat(js, tmp, sizeof(js) - strlen(js) - 1);
             }
-            strcat(js, "]; function updR() { var idx = document.getElementsByName('StationName')[0].selectedIndex - 1; if(idx>=0) { "
+            strncat(js, "]; function updR() { var idx = document.getElementsByName('StationName')[0].selectedIndex - 1; if(idx>=0) { "
                        "var r=rData[idx]; document.getElementsByName('Location')[0].value=r.room; "
                        "document.getElementsByName('Modality')[0].value=r.mod; "
                        "document.getElementsByName('StationAE')[0].value=r.ae; "
                        "document.getElementsByName('SPSID')[0].value=r.ae; "
-                       "document.getElementsByName('ProcDesc')[0].value=r.name; } }</script>");
+                       "document.getElementsByName('ProcDesc')[0].value=r.name; } }</script>", sizeof(js) - strlen(js) - 1);
             SendText(sock, js);
 
             SendText(sock, "<select name='StationName' onchange='updR()'><option value=''>Station Name</option>");
             for (int i = 0; i < rCount; i++) {
-                char tmp[256]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rName[i], rName[i]); SendText(sock, tmp);
+                char tmp[512]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rName[i], rName[i]); SendText(sock, tmp);
             }
             SendText(sock, "</select> ");
             SendText(sock, "<input type='text' name='Location' placeholder='Location'> ");
@@ -1131,18 +1176,6 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             SendText(sock, "<input type='text' name='StationName' placeholder='Station Name'> <input type='text' name='Location' placeholder='Location'> ");
         }
         
-        /* Stream procedure codes directly to avoid stack overflow risks */
-        SendText(sock, "<select id='procCodeSel' onchange=\"loadProcCode()\"><option value=''>Select Procedure Code</option>");
-        if (g_procCodesLoaded) {
-            for (int i = 0; i < g_procCodeCount; i++) {
-                char opt[512];
-                snprintf(opt, sizeof(opt), "<option value='%s' data-id='%s' data-code='%s' data-mod='%s'>%s</option>",
-                        g_procCodes[i].id, g_procCodes[i].id, g_procCodes[i].procCode, g_procCodes[i].modality, g_procCodes[i].name);
-                SendText(sock, opt);
-            }
-        }
-        SendText(sock, "</select> ");
-
         SendText(sock, szHtmlForms2);
         SendText(sock, szHtmlEnd); 
         CloseHttpClient(clientIdx); 
@@ -1159,16 +1192,39 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         }
         
         if (strstr(pBuf, "POST /delete")) {
-            EnterCriticalSection(&g_csvLock);
-            strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1);
-            g_csvData[0][LINE_SIZE - 1] = '\0';
-            g_csvRows = 1;
-            LeaveCriticalSection(&g_csvLock);
+            char *pwdPtr = strstr(body, "pwd=");
+            int pwdMatch = 0;
+            if (pwdPtr) {
+                pwdPtr += 4;
+                char inputPwd[128] = {0};
+                int pIdx = 0;
+                while (*pwdPtr && *pwdPtr != '&' && *pwdPtr != '\r' && *pwdPtr != '\n' && pIdx < 127) {
+                    inputPwd[pIdx++] = *pwdPtr++;
+                }
+                inputPwd[pIdx] = '\0';
+                if (strcmp(inputPwd, g_delPwd) == 0) pwdMatch = 1;
+            }
+            if (pwdMatch) {
+                EnterCriticalSection(&g_csvLock);
+                strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1);
+                g_csvData[0][LINE_SIZE - 1] = '\0';
+                g_csvRows = 1;
+                LeaveCriticalSection(&g_csvLock);
+                SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
+                SendText(sock, "<meta http-equiv='refresh' content='1; url=/' /><h2>Data Deleted Successfully. Redirecting...</h2>");
+                SendText(sock, szHtmlEnd);
+            } else {
+                SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
+                SendText(sock, "<meta http-equiv='refresh' content='2; url=/' /><h2>Invalid Password! Redirecting...</h2>");
+                SendText(sock, szHtmlEnd);
+            }
+            CloseHttpClient(clientIdx); 
+            return;
         }
         else if (strstr(pBuf, "POST /delpat")) {
             if (!body[0]) { RemoveClient(clientIdx); return; }
-            char acc[64];
-            strncpy(acc, body, 63); acc[63] = '\0';
+            char acc[128];
+            strncpy(acc, body, 127); acc[127] = '\0';
             TrimInPlace(acc);
             EnterCriticalSection(&g_csvLock);
             for (int i = 1; i < g_csvRows; i++) {
@@ -1382,7 +1438,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             CreateWindow("EDIT", g_aeCalled, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, hWnd, (HMENU)ID_EDT_AET, g_hInstance, NULL);
             y += 30;
             
-            char buf[32];
+            char buf[64];
             snprintf(buf, sizeof(buf), "%d", g_TelnetPort);
             CreateWindow("STATIC", "Telnet Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
             CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_TELNET, g_hInstance, NULL);
@@ -1428,7 +1484,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
                 SetBkMode(lpdis->hDC, TRANSPARENT);
                 SetTextColor(lpdis->hDC, RGB(0, 0, 0));
                 
-                char szText[64];
+                char szText[128];
                 GetWindowText(lpdis->hwndItem, szText, sizeof(szText));
                 DrawText(lpdis->hDC, szText, -1, &lpdis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 if (lpdis->itemState & ODS_FOCUS) {
@@ -1463,7 +1519,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
                     SendMessage((HWND)lParam, BM_SETCHECK, chk == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
                 }
                 else if (id == ID_OK) {
-                    GetDlgItemText(hWnd, ID_EDT_AET, g_aeCalled, sizeof(g_aeCalled)); g_aeCalled[16] = '\0';
+                    GetDlgItemText(hWnd, ID_EDT_AET, g_aeCalled, sizeof(g_aeCalled)); g_aeCalled[sizeof(g_aeCalled) - 1] = '\0';
                     
                     BOOL trans;
                     int tp = GetDlgItemInt(hWnd, ID_EDT_TELNET, &trans, FALSE); if (trans) g_TelnetPort = tp;
