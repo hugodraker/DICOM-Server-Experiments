@@ -85,7 +85,7 @@ Randomize Timer
 ' --- Create file ---
 Set fso = CreateObject("Scripting.FileSystemObject")
 outFile = "patients.csv"
-Set outFile = fso.CreateTextFile(outFile, True, True)
+Set outFile = fso.CreateTextFile(outFile, True, False)
 
 ' --- Write header ---
 outFile.WriteLine "ID,Name,Sex,Birthdate,Phone,AltPhone,Email,AltContactName,AltContactPhone,Address,City,State,ZIP"
