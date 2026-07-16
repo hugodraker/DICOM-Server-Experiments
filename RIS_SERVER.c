@@ -1330,9 +1330,12 @@ static int init_patients_csv(void) {
         while (get_csv_field(header, col_idx, field_buf, sizeof(field_buf))) {
             if (str_icontains(field_buf, "Birth") || str_icontains(field_buf, "DOB")) pts_birthdate_col_idx = col_idx;
             else if (str_icontains(field_buf, "Sex") || str_icontains(field_buf, "Gender")) pts_sex_col_idx = col_idx;
-            else if (str_icontains(field_buf, "ID") || str_icontains(field_buf, "PatID")) pts_id_col_idx = col_idx;
-            else if (str_icontains(field_buf, "Name") || str_icontains(field_buf, "Patient")) pts_name_col_idx = col_idx;
-            col_idx++;
+else if (str_icontains(field_buf, "ID") || str_icontains(field_buf, "PatID")) pts_id_col_idx = col_idx;
+// Added '&& pts_name_col_idx == -1' to ensure we only capture the first match
+else if ((str_icontains(field_buf, "Name") || str_icontains(field_buf, "Patient")) && pts_name_col_idx == -1) {
+    pts_name_col_idx = col_idx;
+}
+col_idx++;
         }
         if (pts_name_col_idx < 0) {
             pts_name_col_idx = 0;
