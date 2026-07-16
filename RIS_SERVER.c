@@ -1,5 +1,5 @@
 /* ============================================================================
- * RIS Multi-Protocol Server (DICOM + Telnet + HTTP)
+ * RIS Multi-Protocol Server (DICOM + Telnet + HTTP) - FIXED VERSION
  *
  * THIS WORK IS NOT FIT FOR ANY FUNCTION OR PURPOSE, COMES WITH NO WARRANTY,
  * AND IS BEING RELEASED INTO THE PUBLIC DOMAIN.
@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -54,6 +55,7 @@
 #define ID_EDT_TIMEOUT      1015
 #define ID_CHK_DEBUG        1016
 #define ID_TXT_STATUS       1017
+#define MAX_FIELD_LEN 512
 
 /* ===== Global Variables ===== */
 static int g_TelnetPort = 23, g_HttpPort = 80, g_DicomPort = 104;
@@ -68,6 +70,7 @@ static char g_delPwd[128] = "0";
 static char szIniFile[MAX_PATH];
 static CRITICAL_SECTION g_csvLock;
 static CRITICAL_SECTION g_procCodesLock;
+
 
 static SOCKET g_clients[MAX_CLIENTS];
 static int    g_clientIDs[MAX_CLIENTS];
@@ -105,6 +108,28 @@ static ProcCodeEntry g_procCodes[MAX_PROC_CODES];
 static int g_procCodeCount = 0;
 static int g_procCodesLoaded = 0;
 
+/* Patient directory filtering variables */
+typedef enum {
+    ENCODING_UNKNOWN,
+    ENCODING_UTF8,
+    ENCODING_UTF8_BOM,
+    ENCODING_UTF16_LE,
+    ENCODING_UTF16_BE,
+    ENCODING_ASCII
+} Encoding;
+
+/* Forward declarations for patient directory functions */
+static Encoding detect_encoding(const unsigned char* buf, long len);
+static int utf16le_to_utf8(const wchar_t* input, char* output, int max_output);
+static int utf16be_to_utf8(const unsigned char* input, char* output, int max_output);
+
+static char* patients_csv_data = NULL;
+static long patients_csv_data_len = 0;
+static int pts_name_col_idx = -1;
+static int pts_id_col_idx = 0;
+static int pts_birthdate_col_idx = -1;
+static int pts_sex_col_idx = -1;
+
 typedef struct {
     char patientName[128];
     char patientID[128];
@@ -134,6 +159,10 @@ typedef struct {
     char protoMeaning[128];
     char studyUID[128];
 } MWLEntry;
+
+static Encoding detect_encoding(const unsigned char* buf, long len);
+static int utf16le_to_utf8(const wchar_t* input, char* output, int max_output);
+static int utf16be_to_utf8(const unsigned char* input, char* output, int max_output);
 
 static const char *szIniServer = "Server", *szIniAET = "AETitle", *szIniTelnetPort = "TelnetPort";
 static const char *szIniHttpPort = "HttpPort", *szIniDicomPort = "DicomPort";
@@ -234,8 +263,34 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 "if(id&&code&&mod&&desc){id.value=sel.options[idx].getAttribute('data-id')||'';code.value=sel.options[idx].getAttribute('data-code')||'';mod.value=sel.options[idx].getAttribute('data-mod')||'';desc.value=sel.options[idx].text;}}"
 "}"
 "function filterProcCodes(){var i,f=document.getElementById('procFilter').value.toUpperCase(),s=document.getElementById('procCodeSel'),o=s.options;for(i=1;i<o.length;i++){if((o[i].text||o[i].innerText).toUpperCase().indexOf(f)>-1){o[i].style.display='';}else{o[i].style.display='none';o[i].selected=false;}}}"
-"function searchPatient(){alert('Search not implemented');}"
-"window.onload=function(){newPatient();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
+"let ptDebounce=null;let ptAbort=null;"
+"function filterPatients(){"
+"    var f=document.getElementById('patientFilter').value.trim();"
+"    if(ptDebounce)clearTimeout(ptDebounce);"
+"    ptDebounce=setTimeout(async function(){"
+"        if(ptAbort)ptAbort.abort();"
+"        ptAbort=new AbortController();"
+"        try{"
+"            var res=await fetch('/api/patients?filter='+encodeURIComponent(f),{signal:ptAbort.signal});"
+"            if(!res.ok)return;"
+"            var names=await res.json();"
+"            var sel=document.getElementById('patientSel');"
+"            sel.options.length=0;"
+"            var defaultOpt=document.createElement('option');"
+"            defaultOpt.value='';defaultOpt.text='Select Patient';"
+"            sel.appendChild(defaultOpt);"
+"            names.forEach(function(n){"
+"                var opt=document.createElement('option');"
+"                opt.value=n;opt.text=n;"
+"                sel.appendChild(opt);"
+"            });"
+"        }catch(e){}"
+"    },250);"
+"}"
+"async function loadPatientDetails(name){if(!name)return;try{var res=await fetch('/api/patient/'+encodeURIComponent(name));if(!res.ok)return;var data=await res.json();if(!data.error){document.getElementsByName('PatientName')[0].value=data.name||'';document.getElementsByName('PatientID')[0].value=data.patient_id||'';"
+"var bd=data.birthdate||'';if(/^\\d{8}$/.test(bd)){bd=bd.substr(0,4)+'-'+bd.substr(4,2)+'-'+bd.substr(6,2);}else if(bd.indexOf('/')>-1){var p=bd.split('/');if(p.length===3){if(p[2].length===4)bd=p[2]+'-'+p[0].padStart(2,'0')+'-'+p[1].padStart(2,'0');else if(p[0].length===4)bd=p[0]+'-'+p[1].padStart(2,'0')+'-'+p[2].padStart(2,'0');}}"
+"document.getElementsByName('BirthDate')[0].value=bd;document.getElementsByName('Sex')[0].value=data.sex||'';}}catch(e){}}"
+"window.onload=function(){newPatient();filterPatients();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
 
 static const char *szHtmlEnd = "</body></html>";
 
@@ -377,10 +432,10 @@ static void SendText(SOCKET sock, const char *pText) {
         } else if (r == SOCKET_ERROR) {
             int err = WSAGetLastError();
             if (err == WSAEWOULDBLOCK || err == WSAENOBUFS) {
-                Sleep(1); /* Allow OS TCP buffer to flush before retrying */
+                Sleep(1);
                 continue;
             }
-            break; /* Fatal socket error */
+            break;
         } else {
             break;
         }
@@ -694,7 +749,7 @@ static void send_pdata_tf(SOCKET s, uint8_t pc_id, uint8_t msg_ctrl, const uint8
     free(pdu_buf);
 }
 
-/* Hardened DICOM tag extractor */
+/* Hardened DICOM tag extractor - RESTORED FROM WORKING VERSION */
 static void dicom_get_string(const uint8_t *buf, int len, uint16_t g, uint16_t e, char *out) {
     uint8_t tg[4] = { (uint8_t)(g & 0xFF), (uint8_t)(g >> 8), (uint8_t)(e & 0xFF), (uint8_t)(e >> 8) };
     for (int i = 0; i < len - 8; i++) {
@@ -703,7 +758,7 @@ static void dicom_get_string(const uint8_t *buf, int len, uint16_t g, uint16_t e
             char v1 = buf[i+4], v2 = buf[i+5];
             
             if ((v1 >= 'A' && v1 <= 'Z') && (v2 >= 'A' && v2 <= 'Z')) {
-                if ((v1=='D'&&v2=='A')||(v1=='T'&&v2=='M')||(v1=='C'&&v2=='S')||(v1=='S'&&v2=='H')||
+                if ((v1=='D'&&v2=='A')||(v1=='T'&&v2=='M')||(v1=='C'&&v2=='CS')||(v1=='S'&&v2=='H')||
                     (v1=='L'&&v2=='O')||(v1=='P'&&v2=='N')||(v1=='U'&&v2=='I')||(v1=='A'&&v2=='E')||
                     (v1=='A'&&v2=='S')||(v1=='I'&&v2=='S')||(v1=='D'&&v2=='S')||(v1=='S'&&v2=='T')||
                     (v1=='L'&&v2=='T')||(v1=='U'&&v2=='T')||(v1=='O'&&v2=='B')||(v1=='O'&&v2=='W')||
@@ -731,7 +786,7 @@ static void dicom_get_string(const uint8_t *buf, int len, uint16_t g, uint16_t e
     }
 }
 
-/* ===== DICOM Protocol Handlers ===== */
+/* ===== DICOM Protocol Handlers - RESTORED FROM WORKING VERSION ===== */
 static void handle_association_rq(SOCKET clientSocket, char* buffer, int bytesRead) {
     write_log("Parsing A-ASSOCIATE-RQ...");
     uint8_t ac_pdu[2048] = {0};
@@ -1084,11 +1139,368 @@ static void ProcessClientLine(int clientIdx, char *pLine) {
     CommitPendingEntry(clientIdx); 
 }
 
-/* Hardened HTTP Request Processor: Buffers table rows and streams elements reliably */
+/* ===== Patient Directory Filtering Functions - KEPT FROM BROKEN FILE ===== */
+static void url_decode(const char* src, char* dest, int max_len) {
+    int out = 0;
+    for (int i = 0; src[i] && out < max_len - 1; i++) {
+        if (src[i] == '+') {
+            dest[out++] = ' ';
+        } else if (src[i] == '%' && src[i+1] && src[i+2]) {
+            char hex[3] = { src[i+1], src[i+2], 0 };
+            dest[out++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        } else {
+            dest[out++] = src[i];
+        }
+    }
+    dest[out] = '\0';
+}
+
+static int str_icontains(const char* haystack, const char* needle) {
+    if (!*needle) return 1;
+    for (int i = 0; haystack[i] != '\0'; i++) {
+        int j = 0;
+        while (needle[j] != '\0' && haystack[i + j] != '\0' && 
+               tolower((unsigned char)haystack[i + j]) == tolower((unsigned char)needle[j])) {
+            j++;
+        }
+        if (needle[j] == '\0') return 1;
+    }
+    return 0;
+}
+
+static int get_csv_field(const char* line, int target_col, char* out_buf, int max_len) {
+    int current_col = 0, in_quotes = 0, pos = 0, out_pos = 0;
+    while (line[pos] != '\0' && current_col <= target_col) {
+        char c = line[pos];
+        if (c == '"') {
+            in_quotes = !in_quotes;
+        } else if (c == ',' && !in_quotes) {
+            if (current_col == target_col) break;
+            current_col++;
+        } else {
+            if (current_col == target_col && out_pos < max_len - 1) {
+                out_buf[out_pos++] = c;
+            }
+        }
+        pos++;
+    }
+    out_buf[out_pos] = '\0';
+    TrimInPlace(out_buf);
+    return (current_col == target_col);
+}
+
+static char* load_and_convert_csv(const char* filename, long* data_len) {
+    FILE* fp = fopen(filename, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    rewind(fp);
+    
+    unsigned char* raw_buf = (unsigned char*)malloc(file_size + 4);
+    if (!raw_buf) { fclose(fp); return NULL; }
+    size_t bytes_read = fread(raw_buf, 1, file_size, fp);
+    fclose(fp);
+    if (bytes_read == 0) { free(raw_buf); return NULL; }
+    
+    raw_buf[bytes_read] = '\0';
+    Encoding enc = detect_encoding(raw_buf, bytes_read);
+    char* converted = (char*)malloc(bytes_read + 1);
+    
+    switch (enc) {
+        case ENCODING_UTF8_BOM:
+            memcpy(converted, raw_buf, bytes_read + 1);
+            *data_len = bytes_read - 3;
+            memmove(converted, converted + 3, bytes_read - 2);
+            break;
+        case ENCODING_UTF8:
+            memcpy(converted, raw_buf, bytes_read + 1);
+            *data_len = bytes_read;
+            break;
+        case ENCODING_UTF16_LE:
+            *data_len = utf16le_to_utf8((wchar_t*)(raw_buf + 2), converted, bytes_read);
+            break;
+        case ENCODING_UTF16_BE:
+            *data_len = utf16be_to_utf8(raw_buf + 2, converted, bytes_read);
+            break;
+        default:
+            memcpy(converted, raw_buf, bytes_read + 1);
+            *data_len = bytes_read;
+            break;
+    }
+    free(raw_buf);
+    return converted;
+}
+
+static long get_line_end(const char* data, long start, long len) {
+    long pos = start;
+    while (pos < len && data[pos] != '\r' && data[pos] != '\n') pos++;
+    return pos;
+}
+
+static void skip_newline(const char* data, long* pos, long len) {
+    while (*pos < len && (data[*pos] == '\r' || data[*pos] == '\n')) (*pos)++;
+}
+
+static Encoding detect_encoding(const unsigned char* buf, long len) {
+    if (len >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) return ENCODING_UTF8_BOM;
+    if (len >= 2 && buf[0] == 0xFF && buf[1] == 0xFE) return ENCODING_UTF16_LE;
+    if (len >= 2 && buf[0] == 0xFE && buf[1] == 0xFF) return ENCODING_UTF16_BE;
+    for (long i = 0; i < (len > 1024 ? 1024 : len); i++) {
+        if (buf[i] > 127) return ENCODING_UTF8;
+    }
+    return ENCODING_ASCII;
+}
+
+static int utf16le_to_utf8(const wchar_t* input, char* output, int max_output) {
+    int out_pos = 0, in_idx = 0;
+    while (input[in_idx] != L'\0' && out_pos < max_output - 4) {
+        wchar_t ch = input[in_idx++];
+        if (ch < 0x80) output[out_pos++] = (char)ch;
+        else if (ch < 0x800) {
+            output[out_pos++] = (char)(0xC0 | (ch >> 6));
+            output[out_pos++] = (char)(0x80 | (ch & 0x3F));
+        } else {
+            output[out_pos++] = (char)(0xE0 | (ch >> 12));
+            output[out_pos++] = (char)(0x80 | ((ch >> 6) & 0x3F));
+            output[out_pos++] = (char)(0x80 | (ch & 0x3F));
+        }
+    }
+    output[out_pos] = '\0';
+    return out_pos;
+}
+
+static int utf16be_to_utf8(const unsigned char* input, char* output, int max_output) {
+    int out_pos = 0, in_idx = 0;
+    while (in_idx + 1 < max_output * 2) {
+        unsigned char hi = input[in_idx++];
+        unsigned char lo = input[in_idx++];
+        wchar_t ch = (wchar_t)((hi << 8) | lo);
+        if (ch == 0) break;
+        if (ch < 0x80) output[out_pos++] = (char)ch;
+        else if (ch < 0x800) {
+            output[out_pos++] = (char)(0xC0 | (ch >> 6));
+            output[out_pos++] = (char)(0x80 | (ch & 0x3F));
+        } else {
+            output[out_pos++] = (char)(0xE0 | (ch >> 12));
+            output[out_pos++] = (char)(0x80 | ((ch >> 6) & 0x3F));
+            output[out_pos++] = (char)(0x80 | (ch & 0x3F));
+        }
+    }
+    output[out_pos] = '\0';
+    return out_pos;
+}
+
+static int init_patients_csv(void) {
+    if (!patients_csv_data) {
+        patients_csv_data = load_and_convert_csv("patients.csv", &patients_csv_data_len);
+        if (!patients_csv_data || patients_csv_data_len == 0) {
+            return -1;
+        }
+        long h_end = get_line_end(patients_csv_data, 0, patients_csv_data_len);
+        char header[8192];
+        long h_len = (h_end > 8191) ? 8191 : h_end;
+        memcpy(header, patients_csv_data, h_len);
+        header[h_len] = '\0';
+        TrimInPlace(header);
+        
+        int col_idx = 0;
+        char field_buf[MAX_FIELD_LEN];
+        while (get_csv_field(header, col_idx, field_buf, sizeof(field_buf))) {
+            if (str_icontains(field_buf, "Birth") || str_icontains(field_buf, "DOB")) pts_birthdate_col_idx = col_idx;
+            else if (str_icontains(field_buf, "Sex") || str_icontains(field_buf, "Gender")) pts_sex_col_idx = col_idx;
+            else if (str_icontains(field_buf, "ID") || str_icontains(field_buf, "PatID")) pts_id_col_idx = col_idx;
+            else if (str_icontains(field_buf, "Name") || str_icontains(field_buf, "Patient")) pts_name_col_idx = col_idx;
+            col_idx++;
+        }
+        if (pts_name_col_idx < 0) {
+            pts_name_col_idx = 0;
+            pts_id_col_idx = 1;
+            pts_birthdate_col_idx = 2;
+            pts_sex_col_idx = 3;
+        }
+    }
+    return 0;
+}
+
+static int get_patient_names(const char* filter, char* output, int max_output, int max_count) {
+    if (init_patients_csv() != 0) {
+        snprintf(output, max_output, "[]");
+        return -1;
+    }
+    
+    output[0] = '\0';
+    int count = 0;
+    long data_start = get_line_end(patients_csv_data, 0, patients_csv_data_len);
+    skip_newline(patients_csv_data, &data_start, patients_csv_data_len);
+    
+    snprintf(output, max_output, "[");
+    long line_start = data_start;
+    
+    while (line_start < patients_csv_data_len && (max_count == 0 || count < max_count)) {
+        long line_end = get_line_end(patients_csv_data, line_start, patients_csv_data_len);
+        if (line_end <= line_start) {
+            line_start = line_end + 1;
+            skip_newline(patients_csv_data, &line_start, patients_csv_data_len);
+            continue;
+        }
+        
+        long len = line_end - line_start;
+        if (len > 8191) len = 8191;
+        
+        char line[8192];
+        memcpy(line, &patients_csv_data[line_start], len);
+        line[len] = '\0';
+        TrimInPlace(line);
+        
+        char name_buf[MAX_FIELD_LEN];
+        if (get_csv_field(line, pts_name_col_idx, name_buf, sizeof(name_buf))) {
+            if (filter && strlen(filter) > 0) {
+                if (!str_icontains(name_buf, filter)) {
+                    line_start = line_end;
+                    skip_newline(patients_csv_data, &line_start, patients_csv_data_len);
+                    continue;
+                }
+            }
+            if (count > 0) strncat(output, ",", max_output - strlen(output) - 1);
+            
+            char escaped_name[MAX_FIELD_LEN * 2];
+            int ei = 0;
+            for (int ni = 0; name_buf[ni] && ei < MAX_FIELD_LEN * 2 - 1; ni++) {
+                if (name_buf[ni] == '"' || name_buf[ni] == '\\') escaped_name[ei++] = '\\';
+                escaped_name[ei++] = name_buf[ni];
+            }
+            escaped_name[ei] = '\0';
+            
+            char formatted_name[MAX_FIELD_LEN * 2 + 4];
+            snprintf(formatted_name, sizeof(formatted_name), "\"%s\"", escaped_name);
+            strncat(output, formatted_name, max_output - strlen(output) - 1);
+            count++;
+        }
+        line_start = line_end;
+        skip_newline(patients_csv_data, &line_start, patients_csv_data_len);
+    }
+    
+    strncat(output, "]", max_output - strlen(output) - 1);
+    return count;
+}
+
+static int get_patient_details(const char* patient_name, char* output, int max_output) {
+    if (init_patients_csv() != 0) return -1;
+    
+    long data_start = get_line_end(patients_csv_data, 0, patients_csv_data_len);
+    skip_newline(patients_csv_data, &data_start, patients_csv_data_len);
+    
+    long line_start = data_start;
+    while (line_start < patients_csv_data_len) {
+        long line_end = get_line_end(patients_csv_data, line_start, patients_csv_data_len);
+        if (line_end <= line_start) {
+            line_start = line_end + 1;
+            skip_newline(patients_csv_data, &line_start, patients_csv_data_len);
+            continue;
+        }
+        
+        long len = line_end - line_start;
+        if (len > 8191) len = 8191;
+        
+        char line[8192];
+        memcpy(line, &patients_csv_data[line_start], len);
+        line[len] = '\0';
+        TrimInPlace(line);
+        
+        char name_buf[MAX_FIELD_LEN];
+        if (get_csv_field(line, pts_name_col_idx, name_buf, sizeof(name_buf))) {
+            if (StrIEquals(name_buf, patient_name)) {
+                char id_buf[MAX_FIELD_LEN] = {0}, birthdate_buf[MAX_FIELD_LEN] = {0}, sex_buf[MAX_FIELD_LEN] = {0};
+                if (pts_id_col_idx >= 0) get_csv_field(line, pts_id_col_idx, id_buf, sizeof(id_buf));
+                if (pts_birthdate_col_idx >= 0) get_csv_field(line, pts_birthdate_col_idx, birthdate_buf, sizeof(birthdate_buf));
+                if (pts_sex_col_idx >= 0) get_csv_field(line, pts_sex_col_idx, sex_buf, sizeof(sex_buf));
+                
+                snprintf(output, max_output, "{\"patient_id\":\"%s\",\"name\":\"%s\",\"birthdate\":\"%s\",\"sex\":\"%s\"}", id_buf, name_buf, birthdate_buf, sex_buf);
+                return 0;
+            }
+        }
+        line_start = line_end;
+        skip_newline(patients_csv_data, &line_start, patients_csv_data_len);
+    }
+    snprintf(output, max_output, "{\"error\": \"Patient not found\"}");
+    return -1;
+}
+
+static void get_query_param(const char* url, const char* param_name, char* value, int max_value) {
+    value[0] = '\0';
+    const char* start = strstr(url, param_name);
+    if (!start) return;
+    start += strlen(param_name);
+    if (*start != '=') return;
+    start++;
+    
+    char raw_val[256] = {0};
+    int i = 0;
+    while (*start && *start != '&' && *start != '#' && i < (int)sizeof(raw_val) - 1) {
+        raw_val[i++] = *start++;
+    }
+    raw_val[i] = '\0';
+    url_decode(raw_val, value, max_value);
+}
+
+/* ===== HTTP Request Processor - RESTORED WITH PATIENT DIRECTORY SUPPORT ===== */
 static void ProcessHttpClient(int clientIdx, char *pBuf) {
     SOCKET sock = g_clients[clientIdx];
     char *headerEnd = strstr(pBuf, "\r\n\r\n"); if (!headerEnd) return;
     
+    /* API endpoints for patient directory */
+    if (strncmp(pBuf, "GET /api/patient/", 17) == 0) {
+        char* raw_name = pBuf + 17;
+        char decoded_name[512] = {0};
+        char* space = strchr(raw_name, ' ');
+        if (space) *space = '\0';
+        url_decode(raw_name, decoded_name, sizeof(decoded_name));
+        
+        char json_response[BUFFER_SIZE];
+        int result = get_patient_details(decoded_name, json_response, sizeof(json_response));
+        
+        char hdr[256];
+        if (result == 0) {
+            snprintf(hdr, sizeof(hdr), "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n");
+        } else {
+            snprintf(hdr, sizeof(hdr), "HTTP/1.1 404 Not Found\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n");
+        }
+        SendText(sock, hdr);
+        SendText(sock, json_response);
+        CloseHttpClient(clientIdx);
+        return;
+    }
+    else if (strncmp(pBuf, "GET /api/patients", 17) == 0) {
+        char query[256] = {0};
+        char* qmark = strstr(pBuf, "?");
+        if (qmark) {
+            char* space = strchr(qmark, ' ');
+            if (space) *space = '\0';
+            strcpy(query, qmark + 1);
+        }
+        
+        char filter[256] = {0};
+        get_query_param(query, "filter", filter, sizeof(filter));
+        
+        char json_response[BUFFER_SIZE];
+        /* Return first 10 without filter, unlimited with filter */
+        int max_results = (strlen(filter) > 0) ? 0 : 10;
+        int count = get_patient_names(filter, json_response, sizeof(json_response), max_results);
+        
+        if (count >= 0) {
+            char hdr[256];
+            snprintf(hdr, sizeof(hdr), "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n");
+            SendText(sock, hdr);
+            SendText(sock, json_response);
+        } else {
+            SendText(sock, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\": \"Server error\"}");
+        }
+        CloseHttpClient(clientIdx);
+        return;
+    }
+    
+    /* Main HTML page */
     if (pBuf[0] == 'G') {
         SendText(sock, szHttp200OK); 
         SendText(sock, szHtmlStart);
@@ -1100,7 +1512,6 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 char entry[ENTRY_SIZE]; 
                 ParseCSVLineToEntry(g_csvData[ri], entry);
                 
-                /* Assemble row into line buffer to reduce socket send overhead by 98% */
                 char rowBuf[LINE_SIZE]; rowBuf[0] = '\0';
                 strncat(rowBuf, isHeader ? "<tr>" : "<tr onclick='f(this)' style='cursor:pointer;'>", LINE_SIZE - strlen(rowBuf) - 1);
                 for (int fi = 0; fi < FIELD_COUNT; fi++) {
@@ -1118,9 +1529,17 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         /* Send forms Part 1 */
         SendText(sock, szHtmlFormsTop);
 
+        /* Add patient directory search section */
+        SendText(sock, "<div style='display:flex; gap:20px; margin-bottom:15px;'>"
+        "<div>"
+        "<input type='text' id='patientFilter' oninput='filterPatients()' placeholder='Filter patients...' style='width: 300px; display: block; margin-bottom: 5px; padding: 5px;'>"
+        "<select id='patientSel' size='5' onchange='loadPatientDetails(this.value)' style='width: 300px; vertical-align:top;'>"
+        "<option value=''>Select Patient</option></select></div>");
+
         /* Procedure codes select and filter box */
-        SendText(sock, "<input type='text' id='procFilter' onkeyup='filterProcCodes()' placeholder='Filter procedure codes...' style='width: 600px; display: block; margin-bottom: 5px; padding: 5px;'>");
-        SendText(sock, "<select id='procCodeSel' multiple size='5' onchange=\"loadProcCode()\" style='width: 600px; vertical-align:top; margin-bottom: 15px;'><option value=''>Select Procedure Code</option>");
+        SendText(sock, "<div>"
+        "<input type='text' id='procFilter' onkeyup='filterProcCodes()' placeholder='Filter procedure codes...' style='width: 300px; display: block; margin-bottom: 5px; padding: 5px;'>"
+        "<select id='procCodeSel' multiple size='5' onchange=\"loadProcCode()\" style='width: 300px; vertical-align:top; margin-bottom: 15px;'><option value=''>Select Procedure Code</option>");
         if (g_procCodesLoaded) {
             for (int i = 0; i < g_procCodeCount; i++) {
                 char opt[1024];
@@ -1129,7 +1548,7 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 SendText(sock, opt);
             }
         }
-        SendText(sock, "</select><br>");
+        SendText(sock, "</select></div></div>");
 
         /* Send Inputs */
         SendText(sock, szHtmlFormsInputs);
@@ -1181,6 +1600,8 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         CloseHttpClient(clientIdx); 
         return;
     }
+    
+    /* POST handlers */
     if (pBuf[0] == 'P') {
         char *body = strstr(pBuf, "\r\n\r\n"); if (!body) { RemoveClient(clientIdx); return; }
         body += 4;
@@ -1285,6 +1706,7 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
     RemoveClient(clientIdx);
 }
 
+/* ===== Client Management ===== */
 static void CheckPendingAndTimeout(int clientIdx) {
     SOCKET sock = g_clients[clientIdx]; if (sock == 0) return;
     DWORD nowTick = GetTickCount();
@@ -1364,7 +1786,6 @@ static int StartDicomServer(void) {
 
 static int FindFreeClientSlot(void) { for (int i = 0; i < MAX_CLIENTS; i++) if (g_clients[i] == 0) return i; return -1; }
 
-/* ===== Client Management ===== */
 static void AddClient(SOCKET sock, int clientType) {
     int idx = FindFreeClientSlot();
     if (idx == -1) { closesocket(sock); return; }
@@ -1652,9 +2073,25 @@ int main(int argc, char *argv[]) {
     MSG qmsg;
     for (;;) { 
         ServerLoop(); if (g_bExitApp) break;
-        if (PeekMessage(&qmsg, NULL, WM_QUIT, WM_QUIT, PM_NOREMOVE)) break; Sleep(10); 
+        if (PeekMessage(&qmsg, NULL, 0, 0, PM_REMOVE)) { 
+            if (qmsg.message == WM_QUIT) break;
+            TranslateMessage(&qmsg); DispatchMessage(&qmsg); 
+        } else {
+            Sleep(10);
+        }
     }
     
-    ServerStop(); DeleteCriticalSection(&g_csvLock); DeleteCriticalSection(&g_procCodesLock); WSACleanup(); Shell_NotifyIcon(NIM_DELETE, &nid); DestroyWindow(g_hMainWnd);
+    WSACleanup();
+    DeleteCriticalSection(&g_csvLock);
+    DeleteCriticalSection(&g_procCodesLock);
+    
+    if (patients_csv_data) {
+        free(patients_csv_data);
+        patients_csv_data = NULL;
+    }
+    
     return 0;
 }
+
+
+
