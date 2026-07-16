@@ -29,18 +29,19 @@
 #pragma comment(lib, "kernel32.lib")
 
 #define ID_OK IDOK
-#define MAX_CLIENTS          64
-#define RECV_SIZE           8192
-#define CLIENT_BUF_SIZE     16384
+#define MAX_CLIENTS          128
+#define RECV_SIZE           32768
+#define CLIENT_BUF_SIZE     65536
 #define FIELD_COUNT         27
-#define FIELD_SIZE          512
+#define FIELD_SIZE          1024
 #define ENTRY_SIZE          (FIELD_COUNT * FIELD_SIZE)
-#define LINE_SIZE           32768
-#define MAX_CSV_LINE        8192
-#define BUFFER_SIZE         32768
+#define LINE_SIZE           65536
+#define MAX_CSV_LINE        32768
+#define BUFFER_SIZE         131072
 #define APPEND_DELAY_MS     2000
 #define DEFAULT_TIMEOUT_MS  10000
 #define FIONBIO_VAL         0x8004667E
+#define MAX_PATIENT_CSV_MB  (20 * 1024 * 1024)
 #define WM_TRAYICON         (WM_USER + 1)
 #define WM_SETTINGS         (WM_USER + 2)
 #define ID_TRAY_TOGGLE      1000
@@ -91,7 +92,7 @@ static char   g_dispParam[1024];
 NOTIFYICONDATA nid;
 
 /* In-memory CSV store — no file I/O for patient data */
-#define MAX_CSV_ROWS 4096
+#define MAX_CSV_ROWS 16384
 static char g_csvData[MAX_CSV_ROWS][LINE_SIZE];
 static int  g_csvRows = 0;
 static int  g_csvInitialized = 0;
@@ -736,17 +737,22 @@ static void parse_csv_line_mwl(char *line, MWLEntry *e) {
 static void send_pdata_tf(SOCKET s, uint8_t pc_id, uint8_t msg_ctrl, const uint8_t* data, uint32_t data_len) {
     uint32_t pdv_len = 2 + data_len;
     uint32_t pdu_len = 4 + pdv_len;
-    uint8_t* pdu_buf = (uint8_t*)malloc(6 + pdu_len);
-    if (!pdu_buf) return;
+    
+    /* Replaces dynamic allocation: (uint8_t*)malloc(6 + pdu_len) */
+    static uint8_t pdu_buf[BUFFER_SIZE]; 
+    
+    /* Safety check to prevent buffer overflow */
+    if (6 + pdu_len > sizeof(pdu_buf)) return; 
+    
     pdu_buf[0] = 0x04; pdu_buf[1] = 0x00;
     pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF;
     pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
     pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF;
     pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
     pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl;
+    
     memcpy(&pdu_buf[12], data, data_len);
     send(s, (char*)pdu_buf, 6 + pdu_len, 0);
-    free(pdu_buf);
 }
 
 /* Hardened DICOM tag extractor - RESTORED FROM WORKING VERSION */
@@ -846,12 +852,17 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
     dicom_get_string(req_buf, req_len, 0x0040, 0x0002, qDate);
     dicom_get_string(req_buf, req_len, 0x0040, 0x0003, qTime);
 
-    EnsureCsvInitialized();
+EnsureCsvInitialized();
     {
         int row;
         for (row = 1; row < g_csvRows; row++) {
-            MWLEntry e; parse_csv_line_mwl(g_csvData[row], &e);
+            MWLEntry e; 
             
+            // --- FIX START ---
+            char tempLine[LINE_SIZE];
+            strncpy(tempLine, g_csvData[row], LINE_SIZE - 1);
+            tempLine[LINE_SIZE - 1] = '\0';
+            parse_csv_line_mwl(tempLine, &e);
             if (qMod[0] != '\0' && strcmp(qMod, e.modality) != 0) continue;
             if (qAET[0] != '\0' && strcmp(qAET, e.aeTitle) != 0) continue;
             if (qDate[0] != '\0') {
@@ -1190,48 +1201,58 @@ static int get_csv_field(const char* line, int target_col, char* out_buf, int ma
     return (current_col == target_col);
 }
 
+/* Large static global buffers to replace malloc */
+static unsigned char g_raw_csv_buf[MAX_PATIENT_CSV_MB];
+static char g_converted_csv_buf[MAX_PATIENT_CSV_MB];
+
 static char* load_and_convert_csv(const char* filename, long* data_len) {
     FILE* fp = fopen(filename, "rb");
     if (!fp) return NULL;
+    
     fseek(fp, 0, SEEK_END);
     long file_size = ftell(fp);
     rewind(fp);
     
-    unsigned char* raw_buf = (unsigned char*)malloc(file_size + 4);
-    if (!raw_buf) { fclose(fp); return NULL; }
-    size_t bytes_read = fread(raw_buf, 1, file_size, fp);
-    fclose(fp);
-    if (bytes_read == 0) { free(raw_buf); return NULL; }
+    /* Bounds check against our new static buffer */
+    if (file_size >= (long)sizeof(g_raw_csv_buf) - 4) {
+        fclose(fp);
+        return NULL; 
+    }
     
-    raw_buf[bytes_read] = '\0';
-    Encoding enc = detect_encoding(raw_buf, bytes_read);
-    char* converted = (char*)malloc(bytes_read + 1);
+    size_t bytes_read = fread(g_raw_csv_buf, 1, file_size, fp);
+    fclose(fp);
+    if (bytes_read == 0) return NULL; 
+    
+    g_raw_csv_buf[bytes_read] = '\0';
+    Encoding enc = detect_encoding(g_raw_csv_buf, bytes_read);
+    
+    /* Point to our secondary static buffer instead of allocating new memory */
+    char* converted = g_converted_csv_buf;
     
     switch (enc) {
         case ENCODING_UTF8_BOM:
-            memcpy(converted, raw_buf, bytes_read + 1);
+            memcpy(converted, g_raw_csv_buf, bytes_read + 1);
             *data_len = bytes_read - 3;
             memmove(converted, converted + 3, bytes_read - 2);
             break;
         case ENCODING_UTF8:
-            memcpy(converted, raw_buf, bytes_read + 1);
+            memcpy(converted, g_raw_csv_buf, bytes_read + 1);
             *data_len = bytes_read;
             break;
         case ENCODING_UTF16_LE:
-            *data_len = utf16le_to_utf8((wchar_t*)(raw_buf + 2), converted, bytes_read);
+            *data_len = utf16le_to_utf8((wchar_t*)(g_raw_csv_buf + 2), converted, bytes_read);
             break;
         case ENCODING_UTF16_BE:
-            *data_len = utf16be_to_utf8(raw_buf + 2, converted, bytes_read);
+            *data_len = utf16be_to_utf8(g_raw_csv_buf + 2, converted, bytes_read);
             break;
         default:
-            memcpy(converted, raw_buf, bytes_read + 1);
+            memcpy(converted, g_raw_csv_buf, bytes_read + 1);
             *data_len = bytes_read;
             break;
     }
-    free(raw_buf);
+    
     return converted;
 }
-
 static long get_line_end(const char* data, long start, long len) {
     long pos = start;
     while (pos < len && data[pos] != '\r' && data[pos] != '\n') pos++;
