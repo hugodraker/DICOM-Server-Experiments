@@ -278,8 +278,6 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 "            var sel=document.getElementById('patientSel');"
 "            sel.options.length=0;"
 "            var defaultOpt=document.createElement('option');"
-"            defaultOpt.value='';defaultOpt.text='Select Patient';"
-"            sel.appendChild(defaultOpt);"
 "            names.forEach(function(n){"
 "                var opt=document.createElement('option');"
 "                opt.value=n;opt.text=n;"
@@ -1558,12 +1556,12 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         "<div>"
         "<input type='text' id='patientFilter' oninput='filterPatients()' placeholder='Filter patients...' style='width: 300px; display: block; margin-bottom: 5px; padding: 5px;'>"
         "<select id='patientSel' size='5' onchange='loadPatientDetails(this.value)' style='width: 300px; vertical-align:top;'>"
-        "<option value=''>Select Patient</option></select></div>");
+        "</select></div>");
 
         /* Procedure codes select and filter box */
         SendText(sock, "<div>"
         "<input type='text' id='procFilter' onkeyup='filterProcCodes()' placeholder='Filter procedure codes...' style='width: 300px; display: block; margin-bottom: 5px; padding: 5px;'>"
-        "<select id='procCodeSel' multiple size='5' onchange=\"loadProcCode()\" style='width: 300px; vertical-align:top; margin-bottom: 15px;'><option value=''>Select Procedure Code</option>");
+        "<select id='procCodeSel' multiple size='5' onchange=\"loadProcCode()\" style='width: 300px; vertical-align:top; margin-bottom: 15px;'>");
         if (g_procCodesLoaded) {
             for (int i = 0; i < g_procCodeCount; i++) {
                 char opt[1024];
