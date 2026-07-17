@@ -3,17 +3,13 @@
  *
  * This is free and unencumbered software released into the public domain.
  *
- * Anyone is free to copy, modify, publish, use, compile, distribute, or
- * sell this software for any purpose, commercial or non-commercial, and
- * by any means.
- *
  * Usage: telnet <address> [port]
  *   address  Hostname or IP address to connect to
  *   port     Port number (default: 23)
  *
  * Press Ctrl+] or Ctrl+C to disconnect.
  *
- * Compile with GCC:  gcc -o telnet.exe telnet.c -lws2_32
+ * Compile with GCC:  gcc -Os -s -o telnet.exe telnet.c -lws2_32
  * Compile with TCC:   tcc -o telnet.exe telnet.c -lws2_32
  */
 
@@ -34,9 +30,13 @@
 #define TN_SB    250
 #define TN_SE    240
 
+/* ---- Telnet Options ---- */
+#define TN_OPT_ECHO 1
+#define TN_OPT_SGA  3
+
 /*
  * Process data received from the server.
- * Strips Telnet IAC negotiation sequences, sends minimal responses,
+ * Strips Telnet IAC negotiation sequences, replies to ECHO/SGA,
  * and writes the remaining plain text to stdout.
  */
 static void
@@ -54,10 +54,12 @@ process_server_data(unsigned char *buf, int len, SOCKET sock)
             switch (buf[i + 1]) {
 
             case TN_DO:
-                /* We support no options — refuse everything */
                 if (i + 2 >= len) { i++; break; }
                 {
-                    unsigned char r[3] = { TN_IAC, TN_WONT, buf[i + 2] };
+                    unsigned char opt = buf[i + 2];
+                    /* We only accept SGA (Suppress Go Ahead), reject others */
+                    unsigned char reply = (opt == TN_OPT_SGA) ? TN_WILL : TN_WONT;
+                    unsigned char r[3] = { TN_IAC, reply, opt };
                     send(sock, (char *)r, 3, 0);
                 }
                 i += 3;
@@ -69,10 +71,12 @@ process_server_data(unsigned char *buf, int len, SOCKET sock)
                 break;
 
             case TN_WILL:
-                /* Refuse all server-offered options */
                 if (i + 2 >= len) { i++; break; }
                 {
-                    unsigned char r[3] = { TN_IAC, TN_DONT, buf[i + 2] };
+                    unsigned char opt = buf[i + 2];
+                    /* Let the server handle ECHO and SGA, reject others */
+                    unsigned char reply = (opt == TN_OPT_ECHO || opt == TN_OPT_SGA) ? TN_DO : TN_DONT;
+                    unsigned char r[3] = { TN_IAC, reply, opt };
                     send(sock, (char *)r, 3, 0);
                 }
                 i += 3;
@@ -107,7 +111,7 @@ process_server_data(unsigned char *buf, int len, SOCKET sock)
                 break;
 
             default:
-                /* Unknown two-byte command — skip it */
+                /* Unknown two-byte command â€” skip it */
                 i += 2;
                 break;
             }
@@ -211,7 +215,7 @@ main(int argc, char *argv[])
 
     /* ---- Put console into raw mode ----
      * Mode 0 disables echo, line buffering, processed input (Ctrl+C),
-     * and window / mouse event generation — we get raw keystrokes.
+     * and window / mouse event generation â€” we get raw keystrokes.
      */
     hStdin = GetStdHandle(STD_INPUT_HANDLE);
     GetConsoleMode(hStdin, &old_console_mode);
@@ -243,38 +247,48 @@ main(int argc, char *argv[])
             process_server_data(buf, n, sock);
         }
 
-        /* --- Keyboard input available? --- */
-        if (WaitForSingleObject(hStdin, 0) == WAIT_OBJECT_0) {
-            INPUT_RECORD rec[64];
-            DWORD        count, k;
+/* --- Keyboard input available? --- */
+if (WaitForSingleObject(hStdin, 0) == WAIT_OBJECT_0) {
+    INPUT_RECORD rec[64];
+    DWORD        count, k;
 
-            if (ReadConsoleInput(hStdin, rec, 64, &count)) {
-                for (k = 0; k < count; k++) {
-                    char ch;
+    if (ReadConsoleInput(hStdin, rec, 64, &count)) {
+        for (k = 0; k < count; k++) {
+            char ch;
 
-                    if (rec[k].EventType != KEY_EVENT)
-                        continue;
-                    if (!rec[k].Event.KeyEvent.bKeyDown)
-                        continue;
+            if (rec[k].EventType != KEY_EVENT)
+                continue;
+            if (!rec[k].Event.KeyEvent.bKeyDown)
+                continue;
 
-                    ch = rec[k].Event.KeyEvent.uChar.AsciiChar;
-                    if (ch == 0)
-                        continue;
+            ch = rec[k].Event.KeyEvent.uChar.AsciiChar;
+            if (ch == 0)
+                continue;
 
-                    /* Ctrl+] (0x1D) or Ctrl+C (0x03) => disconnect */
-                    if ((unsigned char)ch == 0x1D ||
-                        (unsigned char)ch == 0x03)
-                    {
-                        printf("\r\n");
-                        goto cleanup;
-                    }
+            /* Ctrl+] (0x1D) or Ctrl+C (0x03) => disconnect */
+            if ((unsigned char)ch == 0x1D ||
+                (unsigned char)ch == 0x03)
+            {
+                printf("\r\n");
+                goto cleanup;
+            }
 
-                    send(sock, &ch, 1, 0);
-                }
+            /* --- ENABLE LOCAL ECHO --- */
+            putchar(ch);
+            fflush(stdout);
+            /* ------------------------- */
+
+            /* Translate Enter key (\r) to Telnet newline (\r\n) */
+            if (ch == '\r') {
+                char crlf[2] = { '\r', '\n' };
+                send(sock, crlf, 2, 0);
+            } else {
+                send(sock, &ch, 1, 0);
             }
         }
     }
-
+}
+}
 cleanup:
     /* ---- Restore console and tear down ---- */
     SetConsoleMode(hStdin, old_console_mode);
