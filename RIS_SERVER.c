@@ -1,11 +1,11 @@
 /* ============================================================================
- * RIS Multi-Protocol Server (DICOM + Telnet + HTTP) - FIXED VERSION
+ * RIS Multi-Protocol Server (DICOM + Telnet + HTTP) 
  *
  * THIS WORK IS NOT FIT FOR ANY FUNCTION OR PURPOSE, COMES WITH NO WARRANTY,
  * AND IS BEING RELEASED INTO THE PUBLIC DOMAIN.
  *
  * Compile:
- *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
+ *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32 -lgdi32
  *   tcc -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32
  * ============================================================================ */
 
@@ -71,7 +71,7 @@ static char g_delPwd[128] = "0";
 static char szIniFile[MAX_PATH];
 static CRITICAL_SECTION g_csvLock;
 static CRITICAL_SECTION g_procCodesLock;
-
+static char g_omittedFields[256] = "0";
 
 static SOCKET g_clients[MAX_CLIENTS];
 static int    g_clientIDs[MAX_CLIENTS];
@@ -289,7 +289,8 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 "async function loadPatientDetails(name){if(!name)return;try{var res=await fetch('/api/patient/'+encodeURIComponent(name));if(!res.ok)return;var data=await res.json();if(!data.error){document.getElementsByName('PatientName')[0].value=data.name||'';document.getElementsByName('PatientID')[0].value=data.patient_id||'';"
 "var bd=data.birthdate||'';if(/^\\d{8}$/.test(bd)){bd=bd.substr(0,4)+'-'+bd.substr(4,2)+'-'+bd.substr(6,2);}else if(bd.indexOf('/')>-1){var p=bd.split('/');if(p.length===3){if(p[2].length===4)bd=p[2]+'-'+p[0].padStart(2,'0')+'-'+p[1].padStart(2,'0');else if(p[0].length===4)bd=p[0]+'-'+p[1].padStart(2,'0')+'-'+p[2].padStart(2,'0');}}"
 "document.getElementsByName('BirthDate')[0].value=bd;document.getElementsByName('Sex')[0].value=data.sex||'';}}catch(e){}}"
-"window.onload=function(){newPatient();filterPatients();};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
+"function filterStatus(s){var t=document.getElementById('pTable');if(!t)return;for(var i=1;i<t.rows.length;i++){var st=t.rows[i].cells[19].innerText||t.rows[i].cells[19].textContent;if(s===''||st.trim()===s)t.rows[i].style.display='';else t.rows[i].style.display='none';}}"
+"window.onload=function(){newPatient();filterPatients();filterStatus('1');};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
 
 static const char *szHtmlEnd = "</body></html>";
 
@@ -473,6 +474,9 @@ static void LoadConfig(void) {
     
     GetPrivateProfileString(szIniServer, szIniDelPwd, szDefDelPwd, g_delPwd, sizeof(g_delPwd), szIniFile);
     TrimInPlace(g_delPwd);
+
+    GetPrivateProfileString(szIniServer, "omittedfields", "0", g_omittedFields, sizeof(g_omittedFields), szIniFile);
+    TrimInPlace(g_omittedFields);
     
     g_TelnetPort = GetPrivateProfileInt(szIniServer, szIniTelnetPort, 23, szIniFile);
     g_HttpPort = GetPrivateProfileInt(szIniServer, szIniHttpPort, 80, szIniFile);
@@ -485,6 +489,7 @@ static void SaveConfig(void) {
     char buf[32];
     WritePrivateProfileString(szIniServer, szIniAET, g_aeCalled, szIniFile);
     WritePrivateProfileString(szIniServer, szIniDelPwd, g_delPwd, szIniFile);
+    WritePrivateProfileString(szIniServer, "omittedfields", g_omittedFields, szIniFile);
     
     snprintf(buf, sizeof(buf), "%d", g_TelnetPort);
     WritePrivateProfileString(szIniServer, szIniTelnetPort, buf, szIniFile);
@@ -839,6 +844,27 @@ static void handle_c_echo_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
     send_pdata_tf(clientSocket, pc_id, 0x03, cmd_buf, cmd_len);
 }
 
+static int is_field_omitted(uint16_t g, uint16_t e) {
+    if (!g_omittedFields[0] || strcmp(g_omittedFields, "0") == 0) return 0;
+    
+    char tagStr[16];
+    snprintf(tagStr, sizeof(tagStr), "%04X%04X", g, e);
+    
+    char buf[256];
+    strncpy(buf, g_omittedFields, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    
+    char *token = strtok(buf, ", ");
+    while (token) {
+        TrimInPlace(token);
+        if (StrIEquals(token, tagStr)) {
+            return 1;
+        }
+        token = strtok(NULL, ", ");
+    }
+    return 0;
+}
+
 static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id, const uint8_t *req_buf, int req_len) {
     char qDate[128] = {0};
     char qTime[128] = {0};
@@ -850,17 +876,21 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
     dicom_get_string(req_buf, req_len, 0x0040, 0x0002, qDate);
     dicom_get_string(req_buf, req_len, 0x0040, 0x0003, qTime);
 
-EnsureCsvInitialized();
+    EnsureCsvInitialized();
     {
         int row;
         for (row = 1; row < g_csvRows; row++) {
             MWLEntry e; 
             
-            // --- FIX START ---
             char tempLine[LINE_SIZE];
             strncpy(tempLine, g_csvData[row], LINE_SIZE - 1);
             tempLine[LINE_SIZE - 1] = '\0';
             parse_csv_line_mwl(tempLine, &e);
+            
+            /* Only output patients from ARRIVED (2) through STARTED (4) on the DICOM worklist */
+            int statCode = atoi(e.status);
+            if (statCode < 2 || statCode > 4) continue;
+            
             if (qMod[0] != '\0' && strcmp(qMod, e.modality) != 0) continue;
             if (qAET[0] != '\0' && strcmp(qAET, e.aeTitle) != 0) continue;
             if (qDate[0] != '\0') {
@@ -902,37 +932,37 @@ EnsureCsvInitialized();
             
             uint8_t data_buf[8192]; int data_len = 0;
             
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0050, e.accNum);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0090, e.refPhys);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0010, e.patientName);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0020, e.patientID); 
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0030, e.dob);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0020, 0x000D, e.studyUID);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0032, 0x1060, e.procDesc);
+            if (!is_field_omitted(0x0008, 0x0050)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0050, e.accNum);
+            if (!is_field_omitted(0x0008, 0x0090)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0090, e.refPhys);
+            if (!is_field_omitted(0x0010, 0x0010)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0010, e.patientName);
+            if (!is_field_omitted(0x0010, 0x0020)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0020, e.patientID); 
+            if (!is_field_omitted(0x0010, 0x0030)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0010, 0x0030, e.dob);
+            if (!is_field_omitted(0x0020, 0x000D)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0020, 0x000D, e.studyUID);
+            if (!is_field_omitted(0x0032, 0x1060)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0032, 0x1060, e.procDesc);
 
             dicom_seq_hdr(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0100);
             dicom_item_hdr(data_buf, &data_len, sizeof(data_buf));
             
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0060, e.modality);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0001, e.aeTitle);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0002, e.spsDate);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0003, e.spsTime);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0007, e.spsDesc);
+            if (!is_field_omitted(0x0008, 0x0060)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0060, e.modality);
+            if (!is_field_omitted(0x0040, 0x0001)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0001, e.aeTitle);
+            if (!is_field_omitted(0x0040, 0x0002)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0002, e.spsDate);
+            if (!is_field_omitted(0x0040, 0x0003)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0003, e.spsTime);
+            if (!is_field_omitted(0x0040, 0x0007)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0007, e.spsDesc);
             
             dicom_seq_hdr(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0008);
             dicom_item_hdr(data_buf, &data_len, sizeof(data_buf));
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0100, e.protoCode);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0102, e.protoScheme);
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0104, e.protoMeaning);
+            if (!is_field_omitted(0x0008, 0x0100)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0100, e.protoCode);
+            if (!is_field_omitted(0x0008, 0x0102)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0102, e.protoScheme);
+            if (!is_field_omitted(0x0008, 0x0104)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0008, 0x0104, e.protoMeaning);
             dicom_item_delim(data_buf, &data_len, sizeof(data_buf));
             dicom_seq_delim(data_buf, &data_len, sizeof(data_buf));
             
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0009, e.spsID);
+            if (!is_field_omitted(0x0040, 0x0009)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x0009, e.spsID);
             
             dicom_item_delim(data_buf, &data_len, sizeof(data_buf));
             dicom_seq_delim(data_buf, &data_len, sizeof(data_buf));
 
-            dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x1001, e.procID); 
+            if (!is_field_omitted(0x0040, 0x1001)) dicom_add_string(data_buf, &data_len, sizeof(data_buf), 0x0040, 0x1001, e.procID); 
 
             send_pdata_tf(clientSocket, pc_id, 0x02, data_buf, data_len);
         }
@@ -1522,12 +1552,23 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         return;
     }
     
-    /* Main HTML page */
+/* Main HTML page */
     if (pBuf[0] == 'G') {
         SendText(sock, szHttp200OK); 
         SendText(sock, szHtmlStart);
         EnsureCsvInitialized();
         { 
+            /* Added Filter Buttons */
+            SendText(sock, "<div style='margin-bottom:10px; display:flex; gap:5px;'>"
+                           "<button onclick=\"filterStatus('')\" class='top-btn' style='background:#555555;'>ALL</button>"
+                           "<button onclick=\"filterStatus('0')\" class='top-btn' style='background:#9e9e9e;'>NONE</button>"
+                           "<button onclick=\"filterStatus('1')\" class='top-btn' style='background:#2196F3;'>SCHEDULED</button>"
+                           "<button onclick=\"filterStatus('2')\" class='top-btn' style='background:#ff9800;'>ARRIVED</button>"
+                           "<button onclick=\"filterStatus('3')\" class='top-btn' style='background:#9c27b0;'>READY</button>"
+                           "<button onclick=\"filterStatus('4')\" class='top-btn' style='background:#4CAF50;'>STARTED</button>"
+                           "<button onclick=\"filterStatus('5')\" class='top-btn' style='background:#f44336;'>DEPARTED</button>"
+                           "</div>");
+
             int isHeader = 1; 
             SendText(sock, "<table id='pTable'>");
             for (int ri = 0; ri < g_csvRows; ri++) {
