@@ -54,6 +54,7 @@
 #define ID_CHK_DEBUG        1016
 #define ID_TXT_STATUS       1017
 #define MAX_FIELD_LEN 512
+#define MAX_RULES 256
 /* ===== Global Variables ===== */
 static int g_TelnetPort = 23, g_HttpPort = 80, g_DicomPort = 1104;
 static int g_TelnetTimeout = 10, g_DebugLog = 1, g_bRunning = 0, g_bExitApp = 0;
@@ -95,7 +96,7 @@ static char   g_dispParam[1024];
 
 NOTIFYICONDATA nid;
 
-/* In-memory CSV store   no file I/O for patient data */
+/* In-memory CSV store */
 #define MAX_CSV_ROWS 16384
 static char g_csvData[MAX_CSV_ROWS][LINE_SIZE];
 static int  g_csvRows = 0;
@@ -116,6 +117,78 @@ static int g_procCodesLoaded = 0;
 /* Patient directory filtering variables */
 typedef enum { ENCODING_UNKNOWN, ENCODING_UTF8, ENCODING_UTF8_BOM, ENCODING_UTF16_LE, ENCODING_UTF16_BE, ENCODING_ASCII } Encoding;
 
+/* DICOM Editor Structures & Dict */
+typedef struct {
+    uint16_t group;
+    uint16_t elem;
+    char *new_val;
+    int applied;
+} EditRule;
+
+typedef struct {
+    const char *name;
+    uint16_t group;
+    uint16_t elem;
+    const char *vr;
+} TagDict;
+
+static TagDict DICT[] = {
+    {"FileMetaInformationVersion", 0x0002, 0x0001, "OB"},
+    {"MediaStorageSOPClassUID", 0x0002, 0x0002, "UI"},
+    {"MediaStorageSOPInstanceUID", 0x0002, 0x0003, "UI"},
+    {"TransferSyntaxUID", 0x0002, 0x0010, "UI"},
+    {"ImplementationClassUID", 0x0002, 0x0012, "UI"},
+    {"ImplementationVersionName", 0x0002, 0x0013, "SH"},
+    {"SourceApplicationEntityTitle", 0x0002, 0x0016, "AE"},
+    {"ImageType", 0x0008, 0x0008, "CS"},
+    {"InstanceCreationDate", 0x0008, 0x0012, "DA"},
+    {"InstanceCreationTime", 0x0008, 0x0013, "TM"},
+    {"SOPClassUID", 0x0008, 0x0016, "UI"},
+    {"SOPInstanceUID", 0x0008, 0x0018, "UI"},
+    {"StudyDate", 0x0008, 0x0020, "DA"},
+    {"SeriesDate", 0x0008, 0x0021, "DA"},
+    {"AcquisitionDate", 0x0008, 0x0022, "DA"},
+    {"ContentDate", 0x0008, 0x0023, "DA"},
+    {"StudyTime", 0x0008, 0x0030, "TM"},
+    {"SeriesTime", 0x0008, 0x0031, "TM"},
+    {"AcquisitionTime", 0x0008, 0x0032, "TM"},
+    {"ContentTime", 0x0008, 0x0033, "TM"},
+    {"AccessionNumber", 0x0008, 0x0050, "SH"},
+    {"Modality", 0x0008, 0x0060, "CS"},
+    {"Manufacturer", 0x0008, 0x0070, "LO"},
+    {"InstitutionName", 0x0008, 0x0080, "LO"},
+    {"InstitutionAddress", 0x0008, 0x0081, "ST"},
+    {"ReferringPhysicianName", 0x0008, 0x0090, "PN"},
+    {"StationName", 0x0008, 0x1010, "SH"},
+    {"StudyDescription", 0x0008, 0x1030, "LO"},
+    {"SeriesDescription", 0x0008, 0x103E, "LO"},
+    {"InstitutionalDepartmentName", 0x0008, 0x1040, "LO"},
+    {"PhysiciansOfRecord", 0x0008, 0x1048, "PN"},
+    {"PerformingPhysicianName", 0x0008, 0x1050, "PN"},
+    {"NameOfPhysiciansReadingStudy", 0x0008, 0x1060, "PN"},
+    {"OperatorsName", 0x0008, 0x1070, "PN"},
+    {"ManufacturerModelName", 0x0008, 0x1090, "LO"},
+    {"PatientName", 0x0010, 0x0010, "PN"},
+    {"PatientID", 0x0010, 0x0020, "LO"},
+    {"IssuerOfPatientID", 0x0010, 0x0021, "LO"},
+    {"PatientBirthDate", 0x0010, 0x0030, "DA"},
+    {"PatientBirthTime", 0x0010, 0x0032, "TM"},
+    {"PatientSex", 0x0010, 0x0040, "CS"},
+    {"OtherPatientIDs", 0x0010, 0x1000, "LO"},
+    {"OtherPatientNames", 0x0010, 0x1001, "PN"},
+    {"PatientAge", 0x0010, 0x1010, "AS"},
+    {"PatientSize", 0x0010, 0x1020, "DS"},
+    {"PatientWeight", 0x0010, 0x1030, "DS"},
+    {"StudyInstanceUID", 0x0020, 0x000D, "UI"},
+    {"SeriesInstanceUID", 0x0020, 0x000E, "UI"},
+    {"StudyID", 0x0020, 0x0010, "SH"},
+    {"SeriesNumber", 0x0020, 0x0011, "IS"},
+    {"AcquisitionNumber", 0x0020, 0x0012, "IS"},
+    {"InstanceNumber", 0x0020, 0x0013, "IS"},
+    {"PixelData", 0x7FE0, 0x0010, "OW"},
+    {NULL, 0, 0, NULL}
+};
+
 /* Forward Declarations */
 static Encoding detect_encoding(const unsigned char* buf, long len);
 static int utf16le_to_utf8(const wchar_t* input, char* output, int max_output);
@@ -123,9 +196,11 @@ static int utf16be_to_utf8(const unsigned char* input, char* output, int max_out
 static void SetNonBlocking(SOCKET sock);
 static char *GetFieldPtr(char *pEntry, int fieldIdx);
 static int get_csv_field(const char* line, int target_col, char* out_buf, int max_len);
-static bool patch_tag_in_place(uint8_t* buf, int len, uint16_t g, uint16_t e, const char* new_val);
+static bool apply_dicom_edits_file(const char *input_file, const char *output_file, const char *rules_str, const char *delim);
 static int AccessionEquals(const char *pLine, const char *pAccession);
 static int ParseCSVLineToEntry(const char *pLine, char *pEntry);
+static void RemoveClient(int idx);
+static void ProcessHttpClient(int clientIdx, char *pBuf);
 
 static char* patients_csv_data = NULL;
 static long patients_csv_data_len = 0;
@@ -169,6 +244,178 @@ static const char *szInvalidResp = "INVALID LINE\r\n", *szServerStarted = "Serve
 static const char *szHttp200OK = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
 static const char *szCSVHeader = "PatientName,PatientID,BirthDate,Sex,ReqPhys,ReqSvc,ProcDesc,Reason,Accession,ProcID,Priority,StationAE,StartDate,StartTime,PerfPhys,SPSDesc,SPSID,StationName,Location,Status,Modality,RefPhys,StudyDesc,ProtoCode,ProtoScheme,ProtoMeaning,StudyUID";
 static const char *szFakePatient = ""; 
+
+static const char *szViewerHtml = 
+"<!DOCTYPE html><html><head><title>Web DICOM Viewer</title>\n"
+"<style>body{margin:0;overflow:hidden;background:#000;color:#fff;font-family:sans-serif;}\n"
+"#tb{background:#333;padding:10px;display:flex;gap:10px;align-items:center;border-bottom:1px solid #555;flex-wrap:wrap;}\n"
+"button, .btn{cursor:pointer;background:#4CAF50;color:#fff;border:none;padding:6px 12px;border-radius:3px;font-weight:bold;text-decoration:none;font-size:13px;}\n"
+"button:hover, .btn:hover{background:#45a049;}\n"
+"#main{display:flex;height:calc(100vh - 50px);} #thumbs{width:150px;background:#1a1a1a;overflow-y:auto;padding:10px;flex-shrink:0;}\n"
+".thumb{cursor:pointer;text-align:center;margin-bottom:10px;padding:5px;border:2px solid transparent;border-radius:4px;background:#2a2a2a;}\n"
+".thumb:hover{background:#333;} .thumb.sel{background:#3a4a6a;border-color:#5a7aFF;}\n"
+".thumb canvas{width:120px;height:120px;background:#000;object-fit:contain;display:block;margin:0 auto;}\n"
+".thumb-txt{font-size:12px;margin-bottom:4px;color:#ddd;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;}\n"
+"#view{flex:1;position:relative;overflow:hidden;background:#050505;} canvas{display:block;}\n"
+"#hud{position:absolute;top:10px;left:10px;pointer-events:none;color:#0f0;font-family:monospace;font-weight:bold;text-shadow:1px 1px 0 #000;}\n"
+"</style></head><body>\n"
+"<div id='tb'>\n"
+"<button onclick='nav(-1)'>&#9664; Prev</button><button onclick='nav(1)'>Next &#9654;</button>\n"
+"<button onclick='resetView()' style='background:#2196F3;'>Reset</button>\n"
+"<button onclick='toggleBox()' id='boxBtn' style='background:#9c27b0;'>ROI Box</button>\n"
+"<a id='dlBtn' class='btn' href='#' target='_blank'>Download</a>\n"
+"<button onclick='document.getElementById(\"upl\").click()'>Upload</button>\n"
+"<input type='file' id='upl' style='display:none;' accept='.dcm' onchange='upl(this, false)'>\n"
+"<button onclick='document.getElementById(\"rep\").click()' style='background:#f44336;'>Replace</button>\n"
+"<input type='file' id='rep' style='display:none;' accept='.dcm' onchange='upl(this, true)'>\n"
+"<span style='margin-left:auto;color:#888;font-size:13px;'>1-5:LUT | B:Box | Arrows:Nav | R-Drag:W/L | L-Drag:Pan | Scroll:Zoom</span>\n"
+"</div>\n"
+"<div id='main'>\n"
+"<div id='thumbs'></div>\n"
+"<div id='view'><canvas id='cvs'></canvas><div id='hud'></div></div>\n"
+"</div>\n"
+"<script>\n"
+"let u = new URLSearchParams(window.location.search); let sop = u.get('sop'); let acc = u.get('acc');\n"
+"let imgList = []; let curIdx = -1; let dicom = null;\n"
+"let cvs = document.getElementById('cvs'); let ctx = cvs.getContext('2d');\n"
+"let panX=0, panY=0, zoom=1, isPan=false, isWl=false, lastX=0, lastY=0;\n"
+"let boxMode = false, roiX=0, roiY=0, roiW=100, roiH=100, isDragBox=false;\n"
+"fetch('/api/images?acc='+acc).then(r=>r.json()).then(lst => {\n"
+"  imgList = lst; let thDiv = document.getElementById('thumbs');\n"
+"  lst.forEach((img, i) => {\n"
+"    let d = document.createElement('div'); d.className='thumb'; d.id='t_'+i; d.onclick=()=>loadIdx(i);\n"
+"    d.innerHTML = '<div class=\"thumb-txt\">'+(img.mod||'OT')+'</div><canvas id=\"tc_'+i+'\" width=120 height=120></canvas>';\n"
+"    thDiv.appendChild(d);\n"
+"    if(img.sop === sop) loadIdx(i);\n"
+"    fetch('/download?sop='+img.sop).then(r=>r.arrayBuffer()).then(b=>{ let t=parseDcm(b); drawToCvs(document.getElementById('tc_'+i), t, true); });\n"
+"  });\n"
+"  if(curIdx===-1 && lst.length>0) loadIdx(0);\n"
+"});\n"
+"function loadIdx(i) { \n"
+"  if(curIdx>=0 && document.getElementById('t_'+curIdx)) document.getElementById('t_'+curIdx).classList.remove('sel');\n"
+"  curIdx = i; let tEl = document.getElementById('t_'+i);\n"
+"  if(tEl) { tEl.classList.add('sel'); tEl.scrollIntoView({behavior:'smooth', block:'nearest'}); }\n"
+"  sop = imgList[i].sop; window.history.replaceState(null,'','/view?sop='+sop+'&acc='+acc);\n"
+"  document.getElementById('dlBtn').href = '/download?sop='+sop;\n"
+"  fetch('/download?sop='+sop).then(r=>r.arrayBuffer()).then(b=>{ dicom=parseDcm(b); dicom.dwc=dicom.wc; dicom.dww=dicom.ww; roiW=Math.max(dicom.w/4,50); roiH=Math.max(dicom.h/4,50); roiX=(dicom.w-roiW)/2; roiY=(dicom.h-roiH)/2; resetView(); });\n"
+"}\n"
+"function nav(d) { let n=curIdx+d; if(n>=0 && n<imgList.length) loadIdx(n); }\n"
+"document.addEventListener('keydown', e => { \n"
+"  if(e.key==='ArrowLeft') nav(-1); if(e.key==='ArrowRight') nav(1); \n"
+"  if(!dicom) return;\n"
+"  if(e.key==='1'){ dicom.wc=dicom.dwc; dicom.ww=dicom.dww; drawToCvs(cvs,dicom,false); }\n"
+"  if(e.key==='2'){ dicom.wc=-600; dicom.ww=1500; drawToCvs(cvs,dicom,false); }\n"
+"  if(e.key==='3'){ dicom.wc=300; dicom.ww=1500; drawToCvs(cvs,dicom,false); }\n"
+"  if(e.key==='4'){ dicom.wc=40; dicom.ww=80; drawToCvs(cvs,dicom,false); }\n"
+"  if(e.key==='5'){ dicom.wc=50; dicom.ww=400; drawToCvs(cvs,dicom,false); }\n"
+"  if(e.key.toLowerCase()==='b') toggleBox();\n"
+"  if(e.key.toLowerCase()==='r') resetView();\n"
+"});\n"
+"function toggleBox() { boxMode = !boxMode; document.getElementById('boxBtn').style.opacity = boxMode?0.6:1; if(boxMode) autoLevel(); else drawToCvs(cvs,dicom,false); }\n"
+"function autoLevel() {\n"
+"  if(!dicom||!boxMode)return; let min=99999, max=-99999;\n"
+"  let dv = new DataView(dicom.px.buffer, dicom.px.byteOffset, dicom.px.byteLength);\n"
+"  for(let y=Math.floor(roiY); y<roiY+roiH; y++) {\n"
+"    if(y<0||y>=dicom.h)continue;\n"
+"    for(let x=Math.floor(roiX); x<roiX+roiW; x++) {\n"
+"      if(x<0||x>=dicom.w)continue;\n"
+"      let val = dicom.b==8 ? dv.getUint8(y*dicom.w+x)*dicom.rs+dicom.ri : dv.getInt16((y*dicom.w+x)*2,true)*dicom.rs+dicom.ri;\n"
+"      if(val<min)min=val; if(val>max)max=val;\n"
+"    }\n"
+"  }\n"
+"  if(min<=max) { dicom.ww = Math.max(1, max-min); dicom.wc = min+dicom.ww/2; }\n"
+"  drawToCvs(cvs,dicom,false);\n"
+"}\n"
+"function parseDcm(buf) {\n"
+"  let dv = new DataView(buf); let off = 132; let t = { w:0, h:0, b:16, wc:128, ww:256, rs:1, ri:0, px:null, dwc:128, dww:256 };\n"
+"  while(off+8 <= buf.byteLength) {\n"
+"    let g=dv.getUint16(off,true), e=dv.getUint16(off+2,true); off+=4;\n"
+"    let len=0, isExp=false; \n"
+"    let c1=String.fromCharCode(dv.getUint8(off)), c2=String.fromCharCode(dv.getUint8(off+1));\n"
+"    if(/[A-Z]/.test(c1) && /[A-Z]/.test(c2)) {\n"
+"      isExp=true; off+=2;\n"
+"      if((c1=='O'&&(c2=='B'||c2=='W'||c2=='F')) || (c1=='S'&&c2=='Q') || (c1=='U'&&(c2=='N'||c2=='T'))) { off+=2; len=dv.getUint32(off,true); off+=4; }\n"
+"      else { len=dv.getUint16(off,true); off+=2; }\n"
+"    } else { len=dv.getUint32(off,true); off+=4; }\n"
+"    if(len===0xFFFFFFFF) len=0;\n"
+"    if(g==0x7FE0&&e==0x0010) { \n"
+"        let pxLen = (len===0||len===0xFFFFFFFF) ? buf.byteLength-off : Math.min(len, buf.byteLength-off);\n"
+"        t.px=new Uint8Array(buf,off,pxLen); break; \n"
+"    }\n"
+"    let v=\"\"; if(len>0&&len<255){ for(let k=0;k<len;k++) v+=String.fromCharCode(dv.getUint8(off+k)); v=v.trim(); }\n"
+"    if(g==0x0028&&e==0x0010) t.h=dv.getUint16(off,true);\n"
+"    else if(g==0x0028&&e==0x0011) t.w=dv.getUint16(off,true);\n"
+"    else if(g==0x0028&&e==0x0100) t.b=dv.getUint16(off,true);\n"
+"    else if(g==0x0028&&e==0x1050 && v) t.wc=parseFloat(v.split('\\\\')[0]);\n"
+"    else if(g==0x0028&&e==0x1051 && v) t.ww=parseFloat(v.split('\\\\')[0]);\n"
+"    else if(g==0x0028&&e==0x1052 && v) t.ri=parseFloat(v);\n"
+"    else if(g==0x0028&&e==0x1053 && v) t.rs=parseFloat(v);\n"
+"    off+=len;\n"
+"  }\n"
+"  return t;\n"
+"}\n"
+"let lastImgData = null, lastWc=null, lastWw=null;\n"
+"function drawToCvs(c, t, isThumb) {\n"
+"  if(!t||!t.px||!t.w||!t.h) return;\n"
+"  let cx=c.getContext('2d'); \n"
+"  let imgData;\n"
+"  if (!isThumb && lastImgData && lastImgData.width===t.w && lastImgData.height===t.h && lastWc===t.wc && lastWw===t.ww) {\n"
+"      imgData = lastImgData;\n"
+"  } else {\n"
+"      imgData = cx.createImageData(t.w, t.h);\n"
+"      let minV = t.wc - 0.5 - (t.ww-1)/2, maxV = t.wc - 0.5 + (t.ww-1)/2;\n"
+"      let dv = new DataView(t.px.buffer, t.px.byteOffset, t.px.byteLength);\n"
+"      for(let i=0; i<t.w*t.h; i++) {\n"
+"        let val = t.b==8 ? dv.getUint8(i)*t.rs+t.ri : dv.getInt16(i*2,true)*t.rs+t.ri;\n"
+"        let p = val<=minV?0 : val>maxV?255 : ((val-(t.wc-0.5))/(t.ww-1))*255;\n"
+"        let idx = i*4; imgData.data[idx]=p; imgData.data[idx+1]=p; imgData.data[idx+2]=p; imgData.data[idx+3]=255;\n"
+"      }\n"
+"      if(!isThumb) { lastImgData=imgData; lastWc=t.wc; lastWw=t.ww; }\n"
+"  }\n"
+"  if(isThumb) {\n"
+"    let temp=document.createElement('canvas'); temp.width=t.w; temp.height=t.h;\n"
+"    temp.getContext('2d').putImageData(imgData,0,0);\n"
+"    cx.drawImage(temp, 0, 0, t.w, t.h, 0, 0, c.width, c.height);\n"
+"  } else { \n"
+"    c.width=t.w; c.height=t.h; cx.putImageData(imgData,0,0); \n"
+"    if(boxMode) { cx.strokeStyle='yellow'; cx.lineWidth=2/zoom; cx.strokeRect(roiX, roiY, roiW, roiH); }\n"
+"    render(); \n"
+"  }\n"
+"}\n"
+"function resetView() { if(!dicom)return; let v=document.getElementById('view'); zoom=Math.min(v.clientWidth/dicom.w, v.clientHeight/dicom.h)*0.95; panX=(v.clientWidth-dicom.w*zoom)/2; panY=(v.clientHeight-dicom.h*zoom)/2; drawToCvs(cvs,dicom,false); }\n"
+"function render() {\n"
+"  cvs.style.transformOrigin='0 0'; cvs.style.transform='translate('+panX+'px,'+panY+'px) scale('+zoom+')';\n"
+"  document.getElementById('hud').innerText = 'WW: '+Math.round(dicom.ww)+' | WC: '+Math.round(dicom.wc);\n"
+"}\n"
+"let v=document.getElementById('view');\n"
+"v.onmousedown=e=>{ \n"
+"  let r=cvs.getBoundingClientRect(); let mx=(e.clientX-r.left)/zoom; let my=(e.clientY-r.top)/zoom;\n"
+"  if(e.button==0) {\n"
+"    if(boxMode && mx>=roiX && mx<=roiX+roiW && my>=roiY && my<=roiY+roiH) isDragBox=true;\n"
+"    else isPan=true;\n"
+"  }\n"
+"  if(e.button==2)isWl=true; \n"
+"  lastX=e.clientX; lastY=e.clientY; \n"
+"};\n"
+"window.onmouseup=()=>{ isPan=false; isWl=false; isDragBox=false; };\n"
+"window.onmousemove=e=>{\n"
+"  if(isDragBox) { roiX+=(e.clientX-lastX)/zoom; roiY+=(e.clientY-lastY)/zoom; lastX=e.clientX; lastY=e.clientY; autoLevel(); }\n"
+"  else if(isPan) { panX+=(e.clientX-lastX); panY+=(e.clientY-lastY); lastX=e.clientX; lastY=e.clientY; render(); }\n"
+"  else if(isWl) { dicom.ww+=(e.clientX-lastX)*2; dicom.wc+=(e.clientY-lastY)*2; if(dicom.ww<1)dicom.ww=1; lastX=e.clientX; lastY=e.clientY; drawToCvs(cvs,dicom,false); }\n"
+"};\n"
+"v.onwheel=e=> { let zf = e.deltaY<0?1.1:0.9; let w=dicom.w*zoom, h=dicom.h*zoom; panX-=(w*zf-w)/2; panY-=(h*zf-h)/2; zoom*=zf; render(); };\n"
+"v.oncontextmenu=e=>e.preventDefault();\n"
+"window.onresize=resetView;\n"
+"function upl(fi, isRep){ \n"
+"  if(!fi.files.length) return; \n"
+"  let fd = new FormData(); fd.append('file', fi.files[0]); \n"
+"  if(confirm('Write Worklist data into this file header?')){ \n"
+"    fd.append('rewrite', '1'); fd.append('acc', acc); \n"
+"  } \n"
+"  let url = isRep ? '/replace?sop='+sop : '/upload_new?acc='+acc;\n"
+"  fetch(url, {method:'POST', body:fd}).then(()=>{window.location.reload();}); \n"
+"}\n"
+"</script></body></html>";
 
 static const char *szHtmlFormsTop = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
 "<button type='button' onclick='newPatient()' class='top-btn bg-green'>New Patient</button>"
@@ -267,6 +514,427 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 
 static const char *szHtmlEnd = "</body></html>";
 
+/* ===== Logging ===== */
+static void write_log(const char *msg) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    FILE *fp = fopen("ris_server.log", "a");
+    if (fp) {
+        fprintf(fp, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+        fclose(fp);
+    }
+    printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
+           st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+    fflush(stdout);
+}
+
+static void ExportCSVsOnExit(void) {
+    char backupDir[MAX_PATH];
+    GetPrivateProfileString(szIniServer, "LocalDir", "backup_csvs", backupDir, sizeof(backupDir), szIniFile);
+    CreateDirectoryA(backupDir, NULL);
+
+    // 1. Export Worklist (g_csvData)
+    EnterCriticalSection(&g_csvLock);
+    char worklistPath[MAX_PATH];
+    snprintf(worklistPath, sizeof(worklistPath), "%s\\worklist_backup.csv", backupDir);
+    FILE *fpW = fopen(worklistPath, "w");
+    if (fpW) {
+        for (int r = 0; r < g_csvRows; r++) {
+            fprintf(fpW, "%s\n", g_csvData[r]);
+        }
+        fclose(fpW);
+    }
+    LeaveCriticalSection(&g_csvLock);
+
+    // 2. Export c-store.csv tracker if it exists
+    EnterCriticalSection(&g_cstoreLock);
+    FILE *fpC = fopen("c-store.csv", "r");
+    if (fpC) {
+        char cStorePath[MAX_PATH];
+        snprintf(cStorePath, sizeof(cStorePath), "%s\\c-store_backup.csv", backupDir);
+        FILE *fpC_out = fopen(cStorePath, "w");
+        if (fpC_out) {
+            char readBuf[2048];
+            while (fgets(readBuf, sizeof(readBuf), fpC)) {
+                fputs(readBuf, fpC_out);
+            }
+            fclose(fpC_out);
+        }
+        fclose(fpC);
+    }
+    LeaveCriticalSection(&g_cstoreLock);
+
+    write_log("CSV files written to local directory on exit.");
+}
+/* ===== DICOM Editor Implementation Functions ===== */
+static const char* get_vr_for_tag(uint16_t group, uint16_t elem) {
+    for (int i = 0; DICT[i].name != NULL; i++) {
+        if (DICT[i].group == group && DICT[i].elem == elem) {
+            return DICT[i].vr;
+        }
+    }
+    return "LO";
+}
+
+static void inject_tag(FILE *fout, EditRule *rule, int is_explicit) {
+    fwrite(&rule->group, 2, 1, fout);
+    fwrite(&rule->elem, 2, 1, fout);
+    
+    uint32_t new_len = (uint32_t)strlen(rule->new_val);
+    int needs_pad = (new_len % 2 != 0);
+    if (needs_pad) new_len++;
+
+    const char *vr = get_vr_for_tag(rule->group, rule->elem);
+    
+    if (is_explicit) {
+        fwrite(vr, 1, 2, fout);
+        if (memcmp(vr, "OB", 2)==0 || memcmp(vr, "OW", 2)==0 || memcmp(vr, "OF", 2)==0 ||
+            memcmp(vr, "SQ", 2)==0 || memcmp(vr, "UT", 2)==0 || memcmp(vr, "UN", 2)==0 ||
+            memcmp(vr, "UR", 2)==0 || memcmp(vr, "UC", 2)==0) {
+            uint16_t res = 0;
+            fwrite(&res, 2, 1, fout);
+            fwrite(&new_len, 4, 1, fout);
+        } else {
+            uint16_t l16 = (uint16_t)new_len;
+            fwrite(&l16, 2, 1, fout);
+        }
+    } else {
+        fwrite(&new_len, 4, 1, fout);
+    }
+    
+    fwrite(rule->new_val, 1, strlen(rule->new_val), fout);
+    if (needs_pad) {
+        char pad = (memcmp(vr, "UI", 2) == 0) ? '\0' : ' '; 
+        fwrite(&pad, 1, 1, fout);
+    }
+}
+
+/* ===== Periodic CSV Backup Background Thread ===== */
+static DWORD WINAPI PeriodicBackupThread(LPVOID lpParam) {
+    (void)lpParam;
+    while (!g_bExitApp) {
+        // Sleep in small increments so we can exit promptly if g_bExitApp becomes true
+        for (int i = 0; i < (45 * 60); i++) {
+            if (g_bExitApp) break;
+            Sleep(1000);
+        }
+        if (g_bExitApp) break;
+
+        char backupDir[MAX_PATH];
+        GetPrivateProfileString(szIniServer, "LocalDir", "backup_csvs", backupDir, sizeof(backupDir), szIniFile);
+        CreateDirectoryA(backupDir, NULL);
+
+        // 1. Backup Worklist (g_csvData)
+        EnterCriticalSection(&g_csvLock);
+        char worklistPath[MAX_PATH];
+        snprintf(worklistPath, sizeof(worklistPath), "%s\\worklist_backup.csv", backupDir);
+        FILE *fpW = fopen(worklistPath, "w");
+        if (fpW) {
+            for (int r = 0; r < g_csvRows; r++) {
+                fprintf(fpW, "%s\n", g_csvData[r]);
+            }
+            fclose(fpW);
+        }
+        LeaveCriticalSection(&g_csvLock);
+
+        // 2. Backup c-store.csv tracker if it exists
+        EnterCriticalSection(&g_cstoreLock);
+        FILE *fpC = fopen("c-store.csv", "r");
+        if (fpC) {
+            char cStorePath[MAX_PATH];
+            snprintf(cStorePath, sizeof(cStorePath), "%s\\c-store_backup.csv", backupDir);
+            FILE *fpC_out = fopen(cStorePath, "w");
+            if (fpC_out) {
+                char readBuf[2048];
+                while (fgets(readBuf, sizeof(readBuf), fpC)) {
+                    fputs(readBuf, fpC_out);
+                }
+                fclose(fpC_out);
+            }
+            fclose(fpC);
+        }
+        LeaveCriticalSection(&g_cstoreLock);
+
+        write_log("Periodic CSV backup to local directory completed.");
+    }
+    return 0;
+}
+static void unescape_string(char *str) {
+    char *read = str, *write = str;
+    while (*read) {
+        if (*read == '\\' && *(read+1)) {
+            read++;
+            switch(*read) {
+                case 'n': *write++ = '\n'; break;
+                case 't': *write++ = '\t'; break;
+                case 'r': *write++ = '\r'; break;
+                case '\\': *write++ = '\\'; break;
+                case '"': *write++ = '"'; break;
+                case 'x': 
+                    if (*(read+1) && *(read+2)) {
+                        char hex[3] = {*(read+1), *(read+2), '\0'};
+                        *write++ = (char)strtol(hex, NULL, 16);
+                        read += 2;
+                    } else {
+                        *write++ = 'x';
+                    }
+                    break;
+                default: *write++ = *read; break;
+            }
+        } else {
+            *write++ = *read;
+        }
+        read++;
+    }
+    *write = '\0';
+}
+
+static int parse_tag(const char *tag_str, uint16_t *group, uint16_t *elem) {
+    unsigned int g = 0, e = 0;
+    char clean[128];
+    int j = 0;
+    
+    for (int i = 0; tag_str[i] && j < 127; i++) {
+        if (tag_str[i] != ' ' && tag_str[i] != '\t') {
+            clean[j++] = tag_str[i];
+        }
+    }
+    clean[j] = '\0';
+
+    for (int i = 0; DICT[i].name != NULL; i++) {
+        if (strcmp(clean, DICT[i].name) == 0) {
+            *group = DICT[i].group;
+            *elem = DICT[i].elem;
+            return 1;
+        }
+    }
+
+    if (sscanf(tag_str, " ( %x , %x )", &g, &e) == 2) { *group = (uint16_t)g; *elem = (uint16_t)e; return 1; }
+    if (sscanf(tag_str, " 0x%x , 0x%x", &g, &e) == 2) { *group = (uint16_t)g; *elem = (uint16_t)e; return 1; }
+    if (sscanf(tag_str, " %x , %x", &g, &e) == 2) { *group = (uint16_t)g; *elem = (uint16_t)e; return 1; }
+    if (strlen(clean) == 8 && sscanf(clean, "%04x%04x", &g, &e) == 2) {
+        *group = (uint16_t)g; *elem = (uint16_t)e; return 1;
+    }
+    return 0;
+}
+
+static EditRule* find_rule(EditRule *rules, int num_rules, uint16_t group, uint16_t elem) {
+    for (int i = 0; i < num_rules; i++) {
+        if (rules[i].group == group && rules[i].elem == elem)
+            return &rules[i];
+    }
+    return NULL;
+}
+
+static int compare_rules(const void *a, const void *b) {
+    EditRule *r1 = (EditRule *)a;
+    EditRule *r2 = (EditRule *)b;
+    if (r1->group != r2->group) return r1->group - r2->group;
+    return r1->elem - r2->elem;
+}
+
+/* ===== DICOM Editor Implementation Function (Robust with Windows File Replacement) ===== */
+static bool apply_dicom_edits_file(const char *input_file, const char *output_file, const char *rules_str, const char *delim) {
+    EditRule rules[MAX_RULES];
+    int num_rules = 0;
+
+    char *args_copy = strdup(rules_str);
+    if (!args_copy) return false;
+    char *p = args_copy;
+    size_t delim_len = strlen(delim);
+    if (delim_len == 0) { free(args_copy); return false; }
+
+    while (p && *p && num_rules < MAX_RULES) {
+        char *next = strstr(p, delim);
+        if (next) {
+            *next = '\0';
+            next += delim_len;
+        }
+        
+        char *eq = strchr(p, '=');
+        if (eq) {
+            *eq = '\0';
+            char *tag_str = p;
+            char *val_str = eq + 1;
+            
+            uint16_t g, e;
+            if (parse_tag(tag_str, &g, &e)) {
+                rules[num_rules].group = g;
+                rules[num_rules].elem = e;
+                rules[num_rules].new_val = strdup(val_str);
+                rules[num_rules].applied = 0;
+                if (rules[num_rules].new_val) unescape_string(rules[num_rules].new_val);
+                num_rules++;
+            }
+        }
+        p = next;
+    }
+    free(args_copy);
+
+    qsort(rules, num_rules, sizeof(EditRule), compare_rules);
+
+    FILE *fin = fopen(input_file, "rb");
+    if (!fin) {
+        for (int i = 0; i < num_rules; i++) free(rules[i].new_val);
+        return false;
+    }
+    
+    FILE *fout = fopen(output_file, "wb");
+    if (!fout) {
+        fclose(fin);
+        for (int i = 0; i < num_rules; i++) free(rules[i].new_val);
+        return false;
+    }
+
+    char header[132];
+    size_t bytes_read_hdr = fread(header, 1, 132, fin);
+    int has_dicm = (bytes_read_hdr == 132 && strncmp(header + 128, "DICM", 4) == 0);
+    if (has_dicm) {
+        fwrite(header, 1, 132, fout);
+    } else {
+        rewind(fin);
+    }
+
+    int in_meta = 1;
+    int is_explicit = 1; 
+    int ts_explicit = 1;
+
+    uint16_t group, elem;
+    while (fread(&group, 2, 1, fin) == 1) {
+        if (fread(&elem, 2, 1, fin) != 1) break;
+
+        if (in_meta && group > 0x0002) {
+            in_meta = 0;
+            is_explicit = ts_explicit; 
+        }
+
+        int is_sq_item = (group == 0xFFFE); 
+
+        if (!is_sq_item) {
+            for (int i = 0; i < num_rules; i++) {
+                if (!rules[i].applied) {
+                    if ((rules[i].group < group) || 
+                        (rules[i].group == group && rules[i].elem < elem)) {
+                        int use_explicit = (rules[i].group <= 0x0002) ? ts_explicit : is_explicit;
+                        inject_tag(fout, &rules[i], use_explicit);
+                        rules[i].applied = 1;
+                    }
+                }
+            }
+        }
+
+        char vr[3] = {0};
+        uint32_t length = 0;
+        int is_32bit_len = 0;
+
+        if (is_explicit && !is_sq_item) {
+            if (fread(vr, 1, 2, fin) != 2) break;
+            if (memcmp(vr, "OB", 2)==0 || memcmp(vr, "OW", 2)==0 || memcmp(vr, "OF", 2)==0 ||
+                memcmp(vr, "SQ", 2)==0 || memcmp(vr, "UT", 2)==0 || memcmp(vr, "UN", 2)==0 ||
+                memcmp(vr, "UR", 2)==0 || memcmp(vr, "UC", 2)==0) {
+                uint16_t reserved;
+                fread(&reserved, 2, 1, fin);
+                fread(&length, 4, 1, fin);
+                is_32bit_len = 1;
+            } else {
+                uint16_t len16;
+                fread(&len16, 2, 1, fin);
+                length = len16;
+            }
+        } else {
+            fread(&length, 4, 1, fin);
+            is_32bit_len = 1;
+        }
+
+        EditRule *rule = find_rule(rules, num_rules, group, elem);
+
+        fwrite(&group, 2, 1, fout);
+        fwrite(&elem, 2, 1, fout);
+
+        if (rule && !is_sq_item) {
+            rule->applied = 1;
+            uint32_t new_len = (uint32_t)strlen(rule->new_val);
+            int needs_pad = (new_len % 2 != 0);
+            if (needs_pad) new_len++;
+
+            if (is_explicit) {
+                fwrite(vr, 1, 2, fout);
+                if (is_32bit_len) {
+                    uint16_t res = 0;
+                    fwrite(&res, 2, 1, fout);
+                    fwrite(&new_len, 4, 1, fout);
+                } else {
+                    uint16_t l16 = (uint16_t)new_len;
+                    fwrite(&l16, 2, 1, fout);
+                }
+            } else {
+                fwrite(&new_len, 4, 1, fout);
+            }
+
+            fwrite(rule->new_val, 1, strlen(rule->new_val), fout);
+            if (needs_pad) {
+                char pad = (memcmp(vr, "UI", 2) == 0) ? '\0' : ' '; 
+                fwrite(&pad, 1, 1, fout);
+            }
+
+            if (length > 0 && length != 0xFFFFFFFF) {
+                fseek(fin, length, SEEK_CUR);
+            }
+        } else {
+            if (is_explicit && !is_sq_item) {
+                fwrite(vr, 1, 2, fout);
+                if (is_32bit_len) {
+                    uint16_t res = 0;
+                    fwrite(&res, 2, 1, fout);
+                    fwrite(&length, 4, 1, fout);
+                } else {
+                    uint16_t l16 = (uint16_t)length;
+                    fwrite(&l16, 2, 1, fout);
+                }
+            } else {
+                fwrite(&length, 4, 1, fout);
+            }
+
+            if (group == 0x0002 && elem == 0x0010 && length > 0) {
+                char ts[128] = {0};
+                fread(ts, 1, (length < sizeof(ts) ? length : sizeof(ts)-1), fin);
+                fwrite(ts, 1, length, fout); 
+                
+                if (strncmp(ts, "1.2.840.10008.1.2.1", 19) == 0) {
+                    ts_explicit = 1;
+                } else if (strncmp(ts, "1.2.840.10008.1.2", 17) == 0) {
+                    ts_explicit = 0; 
+                }
+            } 
+            else if (length > 0 && length != 0xFFFFFFFF) {
+                char buffer[8192];
+                uint32_t remaining = length;
+                while (remaining > 0) {
+                    uint32_t to_read = remaining > sizeof(buffer) ? sizeof(buffer) : remaining;
+                    size_t bytes = fread(buffer, 1, to_read, fin);
+                    if (bytes == 0) break;
+                    fwrite(buffer, 1, bytes, fout);
+                    remaining -= (uint32_t)bytes;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < num_rules; i++) {
+        if (!rules[i].applied) {
+            int use_explicit = (rules[i].group <= 0x0002) ? ts_explicit : is_explicit;
+            inject_tag(fout, &rules[i], use_explicit);
+            rules[i].applied = 1;
+        }
+    }
+
+    fclose(fin);
+    fclose(fout);
+    for (int i = 0; i < num_rules; i++) free(rules[i].new_val);
+    return true;
+}
+
 /* ===== Update Existing Accession Images ===== */
 static void UpdateAccessionImages(const char *oldAcc, char *newEntry) {
     if (!oldAcc || !oldAcc[0]) return;
@@ -307,33 +975,17 @@ static void UpdateAccessionImages(const char *oldAcc, char *newEntry) {
                         newAcc, newName, newId, cSop, cFolder, cFile, cMod, cSize, cTime);
                 changed = 1;
 
-                char path[MAX_PATH];
+                char path[MAX_PATH], tempPath[MAX_PATH];
                 snprintf(path, sizeof(path), "%s\\%s\\%s", g_storageRoot, cFolder, cFile);
-                FILE *imgFp = fopen(path, "rb");
-                if (imgFp) {
-                    fseek(imgFp, 0, SEEK_END);
-                    long fileLen = ftell(imgFp);
-                    rewind(imgFp);
-                    uint8_t *fileData = (uint8_t*)malloc(fileLen);
-                    if (fileData) {
-                        if (fread(fileData, 1, fileLen, imgFp) == fileLen) {
-                            fclose(imgFp);
-                            patch_tag_in_place(fileData, fileLen, 0x0010, 0x0010, newName);
-                            patch_tag_in_place(fileData, fileLen, 0x0010, 0x0020, newId);
-                            patch_tag_in_place(fileData, fileLen, 0x0010, 0x0030, newDob);
-                            patch_tag_in_place(fileData, fileLen, 0x0008, 0x0050, newAcc);
-                            FILE *patchFp = fopen(path, "wb");
-                            if (patchFp) {
-                                fwrite(fileData, 1, fileLen, patchFp);
-                                fclose(patchFp);
-                            }
-                        } else {
-                            fclose(imgFp);
-                        }
-                        free(fileData);
-                    } else {
-                        fclose(imgFp);
-                    }
+                snprintf(tempPath, sizeof(tempPath), "%s\\%s\\temp_%s", g_storageRoot, cFolder, cFile);
+
+                char rules[512];
+                snprintf(rules, sizeof(rules), "0x0008,0x0050=%s`0x0010,0x0010=%s`0x0010,0x0020=%s`0x0010,0x0030=%s", newAcc, newName, newId, newDob);
+                if (apply_dicom_edits_file(path, tempPath, rules, "`")) {
+                    remove(path);
+                    rename(tempPath, path);
+                } else {
+                    remove(tempPath);
                 }
             } else {
                 fprintf(outFp, "%s", cLine);
@@ -354,7 +1006,6 @@ static void UpdateAccessionImages(const char *oldAcc, char *newEntry) {
     }
     LeaveCriticalSection(&g_cstoreLock);
 
-    // If the accession was explicitly modified, remove the orphaned patient row
     if (strcmp(oldAcc, newAcc) != 0) {
         EnterCriticalSection(&g_csvLock);
         for (int i = 1; i < g_csvRows; i++) {
@@ -369,23 +1020,8 @@ static void UpdateAccessionImages(const char *oldAcc, char *newEntry) {
         LeaveCriticalSection(&g_csvLock);
     }
 }
-/* ===== Logging ===== */
-static void write_log(const char *msg) {
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    FILE *fp = fopen("ris_server.log", "a");
-    if (fp) {
-        fprintf(fp, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
-               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
-        fclose(fp);
-    }
-    printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
-           st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
-    fflush(stdout);
-}
 
 /* ===== Helpers ===== */
-static void RemoveClient(int idx);
 static int get_csv_field(const char* line, int target_col, char* out_buf, int max_len);
 static char *GetFieldPtr(char *pEntry, int fieldIdx) { return pEntry + (fieldIdx * FIELD_SIZE); }
 static char *GetPendingEntryPtr(int idx) { return g_pendingEntries + (idx * ENTRY_SIZE); }
@@ -603,42 +1239,6 @@ static void LoadCStoreTracking(void) {
     LeaveCriticalSection(&g_cstoreLock);
 }
 
-/* ===== Memory Patching for DICOM Headers ===== */
-static bool patch_tag_in_place(uint8_t* buf, int len, uint16_t g, uint16_t e, const char* new_val) {
-    if (!new_val || !new_val[0]) return false;
-    uint8_t tg[4] = { (uint8_t)(g & 0xFF), (uint8_t)(g >> 8), (uint8_t)(e & 0xFF), (uint8_t)(e >> 8) };
-    for (int i = 0; i <= len - 10; i++) {
-        if (buf[i] == tg[0] && buf[i+1] == tg[1] && buf[i+2] == tg[2] && buf[i+3] == tg[3]) {
-            char v1 = buf[i+4], v2 = buf[i+5];
-            int vlen = 0; int offset = 0; bool is_vr = false;
-            if ((v1 >= 'A' && v1 <= 'Z') && (v2 >= 'A' && v2 <= 'Z')) {
-                if ((v1=='D'&&v2=='A')||(v1=='T'&&v2=='M')||(v1=='C'&&v2=='S')||(v1=='S'&&v2=='H')||
-                    (v1=='L'&&v2=='O')||(v1=='P'&&v2=='N')||(v1=='U'&&v2=='I')||(v1=='A'&&v2=='E')||
-                    (v1=='A'&&v2=='S')||(v1=='I'&&v2=='S')||(v1=='D'&&v2=='S')||(v1=='S'&&v2=='T')||
-                    (v1=='L'&&v2=='T')||(v1=='U'&&v2=='T')||(v1=='O'&&v2=='B')||(v1=='O'&&v2=='W')||
-                    (v1=='S'&&v2=='Q')||(v1=='U'&&v2=='N')||(v1=='F'&&v2=='D')||(v1=='F'&&v2=='L')||
-                    (v1=='S'&&v2=='L')||(v1=='S'&&v2=='S')||(v1=='U'&&v2=='L')||(v1=='U'&&v2=='S')) { is_vr = true; }
-            }
-            if (is_vr) {
-                if ((v1=='O'&&v2=='B') || (v1=='O'&&v2=='W') || (v1=='S'&&v2=='Q') || (v1=='U'&&v2=='N')) {
-                    continue; 
-                } else { vlen = buf[i+6] | (buf[i+7]<<8); offset = 8; }
-            } else { vlen = buf[i+4] | (buf[i+5]<<8) | (buf[i+6]<<16) | (buf[i+7]<<24); offset = 8; }
-            
-            if (vlen > 0 && vlen < 2048 && i + offset + vlen <= len) {
-                int copy_len = (int)strlen(new_val);
-                bool changed = false;
-                for (int j = 0; j < vlen; j++) {
-                    uint8_t b = (j < copy_len) ? (uint8_t)new_val[j] : (uint8_t)' ';
-                    if (buf[i + offset + j] != b) { buf[i + offset + j] = b; changed = true; }
-                }
-                return changed;
-            }
-        }
-    }
-    return false;
-}
-
 /* ===== HTTP Multipart Binary Parsers ===== */
 static char* memstr(char* haystack, int hlen, const char* needle) {
     int nlen = (int)strlen(needle);
@@ -717,7 +1317,7 @@ static bool dicom_add_str(uint8_t* buf, int* off, int max, uint16_t g, uint16_t 
     uint32_t len = s ? (uint32_t)strlen(s) : 0; uint32_t pad = (len % 2) ? 1 : 0; uint32_t tot = len + pad;
     if (*off + 8 + (int)tot > max) return false;
     buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
-    buf[(*off)++]=tot&0xFF; buf[(*off)++]=(tot>>8)&0xFF; buf[(*off)++]=(tot>>16)&0xFF; buf[(*off)++]=(tot>>24)&0xFF;
+    buf[(*off)++]=tot&0xFF; buf[(*off)++]=(tot>>8)&0xFF; buf[(*off)++]=0; buf[(*off)++]=0;
     if(len>0){memcpy(&buf[*off],s,len);*off+=len;} if(pad) buf[(*off)++]=' '; return true;
 }
 static bool dicom_add_us(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, uint16_t v) {
@@ -883,7 +1483,7 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
 }
 
 static void handle_c_store_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id, uint8_t *cmd_buf, int cmd_len, uint8_t *data_buf, int data_len) {
-    char sopClass[128] = {0}, sopInst[128] = {0}, acc[128] = {0}, pName[128] = {0}, pId[128] = {0}, mod[128] = {0};
+    char sopClass[128] = {0}, sopInst[128] = {0}, acc[128] = {0}, pName[128] = {0}, pId[128] = {0}, mod[128] = {0}, studyDesc[128] = {0};
     dicom_get_string(cmd_buf, cmd_len, 0x0000, 0x0002, sopClass); 
     dicom_get_string(cmd_buf, cmd_len, 0x0000, 0x1000, sopInst);
     if (sopInst[0] == '\0') dicom_get_string(data_buf, data_len, 0x0008, 0x0018, sopInst);
@@ -891,6 +1491,7 @@ static void handle_c_store_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_i
     dicom_get_string(data_buf, data_len, 0x0010, 0x0010, pName);
     dicom_get_string(data_buf, data_len, 0x0010, 0x0020, pId); 
     dicom_get_string(data_buf, data_len, 0x0008, 0x0060, mod);
+    dicom_get_string(data_buf, data_len, 0x0008, 0x1030, studyDesc);
 
     if (acc[0] == '\0') {
         int maxVal = 0;
@@ -933,7 +1534,7 @@ static void handle_c_store_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_i
             strncpy(GetFieldPtr(newEntry, 8), acc, FIELD_SIZE - 1);
             strncpy(GetFieldPtr(newEntry, 19), "5", FIELD_SIZE - 1); 
             strncpy(GetFieldPtr(newEntry, 20), mod[0] ? mod : "OT", FIELD_SIZE - 1);
-            strncpy(GetFieldPtr(newEntry, 22), "PACS Image Received", FIELD_SIZE - 1);
+            strncpy(GetFieldPtr(newEntry, 22), studyDesc, FIELD_SIZE - 1);
             
             char lineOut[LINE_SIZE];
             BuildCSVLineFromEntry(newEntry, lineOut);
@@ -1090,7 +1691,8 @@ static int get_csv_field(const char* line, int target_col, char* out_buf, int ma
     } out_buf[out_pos] = '\0'; TrimInPlace(out_buf); return (current_col == target_col);
 }
 
-static unsigned char g_raw_csv_buf[MAX_PATIENT_CSV_MB]; static char g_converted_csv_buf[MAX_PATIENT_CSV_MB];
+static unsigned char g_raw_csv_buf[MAX_PATIENT_CSV_MB]; 
+static char g_converted_csv_buf[MAX_PATIENT_CSV_MB];
 static char* load_and_convert_csv(const char* filename, long* data_len) {
     FILE* fp = fopen(filename, "rb"); if (!fp) return NULL; fseek(fp, 0, SEEK_END); long file_size = ftell(fp); rewind(fp);
     if (file_size >= (long)sizeof(g_raw_csv_buf) - 4) { fclose(fp); return NULL; }
@@ -1189,7 +1791,6 @@ static void get_query_param(const char* url, const char* param_name, char* value
     char raw_val[256] = {0}; int i = 0; while (*start && *start != '&' && *start != '#' && i < (int)sizeof(raw_val) - 1) { raw_val[i++] = *start++; } raw_val[i] = '\0'; url_decode(raw_val, value, max_value);
 }
 
-/* ===== HTTP Request Processor ===== */
 static void ProcessHttpClient(int clientIdx, char *pBuf) {
     SOCKET sock = g_clients[clientIdx];
     char *headerEnd = strstr(pBuf, "\r\n\r\n"); if (!headerEnd) return;
@@ -1206,6 +1807,56 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
         int max_results = (strlen(filter) > 0) ? 0 : 10; int count = get_patient_names(filter, json_response, sizeof(json_response), max_results);
         if (count >= 0) { char hdr[256]; snprintf(hdr, sizeof(hdr), "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n"); SendText(sock, hdr); SendText(sock, json_response); } else { SendText(sock, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\": \"Server error\"}"); }
         CloseHttpClient(clientIdx); return;
+    }
+    else if (strncmp(pBuf, "GET /api/images?acc=", 20) == 0) {
+        char acc[128] = {0};
+        char *accPtr = pBuf + 20;
+        int i = 0;
+        while (*accPtr && *accPtr != ' ' && *accPtr != '&' && i < 127) acc[i++] = *accPtr++;
+        acc[i] = '\0';
+
+        char jsonResp[8192];
+        strcpy(jsonResp, "[");
+        int count = 0;
+
+        EnterCriticalSection(&g_cstoreLock);
+        FILE *fp = fopen("c-store.csv", "r");
+        if (fp) {
+            char cLine[1024];
+            int firstLine = 1;
+            while (fgets(cLine, sizeof(cLine), fp)) {
+                if (firstLine) { firstLine = 0; continue; }
+                char cAcc[128] = {0}, cSop[128] = {0}, cMod[128] = {0}, cFile[128] = {0};
+                get_csv_field(cLine, 0, cAcc, sizeof(cAcc));
+                if (strcmp(cAcc, acc) == 0) {
+                    get_csv_field(cLine, 4, cSop, sizeof(cSop));
+                    get_csv_field(cLine, 6, cFile, sizeof(cFile));
+                    get_csv_field(cLine, 7, cMod, sizeof(cMod));
+                    
+                    if (count > 0) strcat(jsonResp, ",");
+                    char item[256];
+                    snprintf(item, sizeof(item), "{\"sop\":\"%s\",\"file\":\"%s\",\"mod\":\"%s\"}", cSop, cFile, cMod);
+                    strcat(jsonResp, item);
+                    count++;
+                }
+            }
+            fclose(fp);
+        }
+        LeaveCriticalSection(&g_cstoreLock);
+        strcat(jsonResp, "]");
+
+        char hdr[512];
+        snprintf(hdr, sizeof(hdr), "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n");
+        SendText(sock, hdr);
+        SendText(sock, jsonResp);
+        CloseHttpClient(clientIdx);
+        return;
+    }
+    else if (strncmp(pBuf, "GET /view?", 10) == 0) {
+        SendText(sock, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n");
+        SendText(sock, szViewerHtml);
+        CloseHttpClient(clientIdx);
+        return;
     }
     else if (strncmp(pBuf, "GET /header?sop=", 16) == 0) {
         char sop[128] = {0};
@@ -1269,6 +1920,63 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             }
         }
         SendText(sock, "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nFile not found.");
+        CloseHttpClient(clientIdx);
+        return;
+    }
+    else if (strncmp(pBuf, "GET /delimage?sop=", 18) == 0) {
+        char sop[128] = {0};
+        char *sopPtr = pBuf + 18;
+        int i = 0;
+        while (*sopPtr && *sopPtr != ' ' && *sopPtr != '&' && i < 127) sop[i++] = *sopPtr++;
+        sop[i] = '\0';
+
+        if (sop[0]) {
+            char tempCsv[MAX_PATH] = "c-store_temp.csv";
+            int changed = 0;
+            char targetFolder[128] = {0}, targetFile[128] = {0};
+
+            EnterCriticalSection(&g_cstoreLock);
+            FILE *fp = fopen("c-store.csv", "r");
+            FILE *outFp = fopen(tempCsv, "w");
+            if (fp && outFp) {
+                char cLine[1024];
+                int firstLine = 1;
+                while (fgets(cLine, sizeof(cLine), fp)) {
+                    if (firstLine) { fprintf(outFp, "%s", cLine); firstLine = 0; continue; }
+                    char cSop[128] = {0};
+                    get_csv_field(cLine, 4, cSop, sizeof(cSop));
+                    if (strcmp(cSop, sop) == 0) {
+                        get_csv_field(cLine, 5, targetFolder, sizeof(targetFolder));
+                        get_csv_field(cLine, 6, targetFile, sizeof(targetFile));
+                        changed = 1;
+                    } else {
+                        fprintf(outFp, "%s", cLine);
+                    }
+                }
+                fclose(fp);
+                fclose(outFp);
+                if (changed) {
+                    remove("c-store.csv");
+                    rename(tempCsv, "c-store.csv");
+                    
+                    char oldPath[MAX_PATH], newPath[MAX_PATH];
+                    snprintf(oldPath, sizeof(oldPath), "%s\\%s\\%s", g_storageRoot, targetFolder, targetFile);
+                    char fileNoExt[128];
+                    strcpy(fileNoExt, targetFile);
+                    char *dot = strrchr(fileNoExt, '.');
+                    if (dot) *dot = '\0';
+                    snprintf(newPath, sizeof(newPath), "%s\\%s\\%s", g_storageRoot, targetFolder, fileNoExt);
+                    rename(oldPath, newPath);
+                } else {
+                    remove(tempCsv);
+                }
+            } else {
+                if (fp) fclose(fp);
+                if (outFp) fclose(outFp);
+            }
+            LeaveCriticalSection(&g_cstoreLock);
+        }
+        SendText(sock, "HTTP/1.1 302 Found\r\nLocation: /\r\nConnection: close\r\n\r\n");
         CloseHttpClient(clientIdx);
         return;
     }
@@ -1438,6 +2146,8 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                            "<button onclick=\"filterStatus('5')\" class='top-btn' style='background:#f44336;'>DEPARTED</button>"
                            "</div>");
 
+            SendText(sock, "<script>function uplImg(fi, url){ if(!fi.files.length) return; var fd = new FormData(); fd.append('file', fi.files[0]); if(confirm('Would you like to write the currently selected Worklist patient data into this file\\'s header, erasing existing values?')){ fd.append('rewrite', '1'); fd.append('acc', document.getElementsByName('Accession')[0].value); fd.append('name', document.getElementsByName('PatientName')[0].value); fd.append('id', document.getElementsByName('PatientID')[0].value); fd.append('dob', document.getElementsByName('BirthDate')[0].value); fd.append('sex', document.getElementsByName('Sex')[0].value); } fetch(url, {method:'POST', body:fd}).then(function(){window.location.reload();}); }</script>");
+
             int isHeader = 1; 
             SendText(sock, "<table id='pTable'>");
             for (int ri = 0; ri < g_csvRows; ri++) {
@@ -1479,14 +2189,15 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                                 snprintf(linkBuf, sizeof(linkBuf), 
                                     "<div style='margin-bottom:4px; font-size:12px; display:flex; align-items:center; gap:5px;'>"
                                     "<span>%s #%d:</span> "
-                                    "<a href='/download?sop=%s' style='color:#2196F3;text-decoration:none;font-weight:bold;'>%s</a> | "
+                                    "<a href='/view?sop=%s&acc=%s' target='_blank' style='color:#2196F3;text-decoration:none;font-weight:bold;'>%s</a> | "
+                                    "<a href='/download?sop=%s' style='color:#4CAF50;text-decoration:none;font-weight:bold;'>Download</a> | "
                                     "<a href='/header?sop=%s' style='color:#9c27b0;text-decoration:none;font-weight:bold;'>Header</a> | "
-                                    "<form method='POST' action='/replace?sop=%s' enctype='multipart/form-data' style='margin:0; padding:0; display:inline-block;'>"
                                     "<label style='cursor:pointer; color:#f44336; font-weight:bold; text-decoration:none;'>Replace"
-                                    "<input type='file' name='file' accept='.dcm' style='display:none;' onchange='this.form.submit()'>"
-                                    "</label></form>"
+                                    "<input type='file' accept='.dcm' style='display:none;' onchange=\"uplImg(this, '/replace?sop=%s')\">"
+                                    "</label> | "
+                                    "<a href='/delimage?sop=%s' onclick=\"return confirm('Delete image?');\" style='color:#f44336; font-weight:bold; text-decoration:none;'>Delete</a>"
                                     "</div>", 
-                                    cMod[0] ? cMod : "OT", imgIdx++, cSop, cFile, cSop, cSop);
+                                    cMod[0] ? cMod : "OT", imgIdx++, cSop, acc, cFile, cSop, cSop, cSop, cSop);
                                 strncat(rowBuf, linkBuf, LINE_SIZE - strlen(rowBuf) - 1);
                             }
                         }
@@ -1500,10 +2211,9 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                     char uploadBtn[512];
                     snprintf(uploadBtn, sizeof(uploadBtn), 
                         "<div style='font-size:12px; margin-top:5px;'>"
-                        "<form method='POST' action='/upload_new?acc=%s' enctype='multipart/form-data' style='margin:0;'>"
                         "<label style='cursor:pointer; color:#4CAF50; font-weight:bold; text-decoration:none;'>Upload"
-                        "<input type='file' name='file' accept='.dcm' style='display:none;' onchange='this.form.submit()'>"
-                        "</label></form></div></td>", acc);
+                        "<input type='file' accept='.dcm' style='display:none;' onchange=\"uplImg(this, '/upload_new?acc=%s')\">"
+                        "</label></div></td>", acc);
                     strncat(rowBuf, uploadBtn, LINE_SIZE - strlen(rowBuf) - 1);
                 }
                 
@@ -1629,7 +2339,7 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             SendText(sock, "<meta http-equiv='refresh' content='0; url=/settings' /><h2>Upload Complete</h2>");
             SendText(sock, szHtmlEnd); CloseHttpClient(clientIdx); return;
         }
-        else if (strstr(pBuf, "POST /upload_new?acc=")) {
+        else if (strncmp(pBuf, "POST /upload_new?acc=", 21) == 0) {
             char acc[128] = {0};
             char* accPtr = strstr(pBuf, "acc=") + 4;
             int i = 0;
@@ -1656,52 +2366,58 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                     char folder[32], filename[128], path[MAX_PATH];
                     AllocateImageFile(folder, filename, path);
                     
+                    char tempSop[128];
+                    strcpy(tempSop, filename);
+                    char *dot = strrchr(tempSop, '.');
+                    if (dot) *dot = '\0';
+
                     FILE *fp = fopen(path, "wb");
                     if (fp) {
                         fwrite(fileData, 1, fileLen, fp);
                         fclose(fp);
+                        RecordStoredImage(acc, "", "", tempSop, folder, filename, "OT", fileLen);
                         
-                        char pName[128] = {0}, pId[128] = {0};
-                        EnterCriticalSection(&g_csvLock);
-                        for (int r = 1; r < g_csvRows; r++) {
-                            if (AccessionEquals(g_csvData[r], acc)) {
-                                char tempEntry[ENTRY_SIZE];
-                                ParseCSVLineToEntry(g_csvData[r], tempEntry);
-                                strncpy(pName, GetFieldPtr(tempEntry, 0), 127);
-                                strncpy(pId, GetFieldPtr(tempEntry, 1), 127);
-                                break;
+                        char rewrite[16] = {0};
+                        ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "rewrite", rewrite, sizeof(rewrite));
+                        if (rewrite[0] == '1') {
+                            char reqAcc[128] = {0}, reqName[128] = {0}, reqId[128] = {0}, reqDob[128] = {0}, reqSex[128] = {0};
+                            ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "acc", reqAcc, sizeof(reqAcc));
+                            ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "name", reqName, sizeof(reqName));
+                            ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "id", reqId, sizeof(reqId));
+                            ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "dob", reqDob, sizeof(reqDob));
+                            ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "sex", reqSex, sizeof(reqSex));
+
+                            char tempPath[MAX_PATH];
+                            snprintf(tempPath, sizeof(tempPath), "%s\\%s\\temp_%s", g_storageRoot, folder, filename);
+                            char rules[1024];
+                            snprintf(rules, sizeof(rules), "0x0008,0x0050=%s`0x0010,0x0010=%s`0x0010,0x0020=%s`0x0010,0x0030=%s`0x0010,0x0040=%s", reqAcc, reqName, reqId, reqDob, reqSex);
+                            if (apply_dicom_edits_file(path, tempPath, rules, "`")) {
+                                int success = 0;
+                                for (int retry = 0; retry < 10; retry++) {
+                                    if (MoveFileExA(tempPath, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                                        success = 1;
+                                        break;
+                                    }
+                                    Sleep(100);
+                                }
+                                if (!success) {
+                                    remove(path);
+                                    if (rename(tempPath, path) != 0) {
+                                        remove(tempPath);
+                                    }
+                                }
+                            } else {
+                                remove(tempPath);
                             }
                         }
-                        LeaveCriticalSection(&g_csvLock);
-                        
-                        RecordStoredImage(acc, pName, pId, "", folder, filename, "OT", fileLen);
-                        
-                        char tempSop[128];
-                        strcpy(tempSop, filename);
-                        char *dot = strrchr(tempSop, '.');
-                        if (dot) *dot = '\0';
-                        
-                        char askHtml[2048];
-                        snprintf(askHtml, sizeof(askHtml), 
-                            "<h2>File Uploaded Successfully</h2>"
-                            "<div class='query-box'>"
-                            "<p>Would you like to write the Worklist patient data (Accession, Name, DOB, Patient ID) into this file's header, erasing existing values?</p>"
-                            "<form method='POST' action='/patch?newSop=%s&acc=%s'>"
-                            "<button type='submit' class='top-btn bg-green'>Yes, Write Data</button> "
-                            "<a href='/' class='top-btn bg-blue' style='text-decoration:none;'>No, Keep as is</a>"
-                            "</form></div>", tempSop, acc);
-                            
-                        SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
-                        SendText(sock, askHtml);
-                        SendText(sock, szHtmlEnd); 
+
+                        SendText(sock, szHttp200OK);
                         CloseHttpClient(clientIdx); 
                         return;
                     }
                 }
             }
-            SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
-            SendText(sock, "<meta http-equiv='refresh' content='0; url=/' /><h2>Upload Failed</h2>");
-            SendText(sock, szHtmlEnd); 
+            SendText(sock, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
             CloseHttpClient(clientIdx); 
             return;
         }
@@ -1762,28 +2478,48 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                             fwrite(fileData, 1, fileLen, outFp);
                             fclose(outFp);
                             
-                            char askHtml[2048];
-                            snprintf(askHtml, sizeof(askHtml), 
-                                "<h2>File Replaced Successfully</h2>"
-                                "<div class='query-box'>"
-                                "<p>Would you like to write the Worklist patient data (Accession, Name, DOB, Patient ID) into this file's header, erasing existing values?</p>"
-                                "<form method='POST' action='/patch?sop=%s'>"
-                                "<button type='submit' class='top-btn bg-green'>Yes, Write Data</button> "
-                                "<a href='/' class='top-btn bg-blue' style='text-decoration:none;'>No, Keep as is</a>"
-                                "</form></div>", sop);
-                                
-                            SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
-                            SendText(sock, askHtml);
-                            SendText(sock, szHtmlEnd); 
+                            char rewrite[16] = {0};
+                            ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "rewrite", rewrite, sizeof(rewrite));
+                            if (rewrite[0] == '1') {
+                                char reqAcc[128] = {0}, reqName[128] = {0}, reqId[128] = {0}, reqDob[128] = {0}, reqSex[128] = {0};
+                                ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "acc", reqAcc, sizeof(reqAcc));
+                                ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "name", reqName, sizeof(reqName));
+                                ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "id", reqId, sizeof(reqId));
+                                ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "dob", reqDob, sizeof(reqDob));
+                                ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "sex", reqSex, sizeof(reqSex));
+
+                                char tempPath[MAX_PATH];
+                                snprintf(tempPath, sizeof(tempPath), "%s\\%s\\temp_%s", g_storageRoot, targetFolder, targetFile);
+                                char rules[1024];
+                                snprintf(rules, sizeof(rules), "0x0008,0x0050=%s`0x0010,0x0010=%s`0x0010,0x0020=%s`0x0010,0x0030=%s`0x0010,0x0040=%s", reqAcc, reqName, reqId, reqDob, reqSex);
+                                if (apply_dicom_edits_file(path, tempPath, rules, "`")) {
+                                    int success = 0;
+                                    for (int retry = 0; retry < 10; retry++) {
+                                        if (MoveFileExA(tempPath, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                                            success = 1;
+                                            break;
+                                        }
+                                        Sleep(100);
+                                    }
+                                    if (!success) {
+                                        remove(path);
+                                        if (rename(tempPath, path) != 0) {
+                                            remove(tempPath);
+                                        }
+                                    }
+                                } else {
+                                    remove(tempPath);
+                                }
+                            }
+                            
+                            SendText(sock, szHttp200OK);
                             CloseHttpClient(clientIdx); 
                             return;
                         }
                     }
                 }
             }
-            SendText(sock, szHttp200OK); SendText(sock, szHtmlStart);
-            SendText(sock, "<meta http-equiv='refresh' content='0; url=/' /><h2>Replace Failed</h2>");
-            SendText(sock, szHtmlEnd); 
+            SendText(sock, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
             CloseHttpClient(clientIdx); 
             return;
         }
@@ -1796,23 +2532,19 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             char targetFolder[128] = {0}, targetFile[128] = {0};
             int found = 0;
 
-            if (newSop[0]) {
-                EnterCriticalSection(&g_cstoreLock);
-                strcpy(targetFolder, g_storageFolder);
-                LeaveCriticalSection(&g_cstoreLock);
-                snprintf(targetFile, sizeof(targetFile), "%s.dcm", newSop);
-                found = 1;
-            } else if (sop[0]) {
+            char *lookupSop = newSop[0] ? newSop : sop;
+            if (lookupSop[0]) {
                 EnterCriticalSection(&g_cstoreLock);
                 FILE *fp = fopen("c-store.csv", "r");
                 if (fp) {
                     char cLine[1024]; int firstLine = 1;
                     while (fgets(cLine, sizeof(cLine), fp)) {
                         if (firstLine) { firstLine = 0; continue; }
-                        char cSop[128] = {0};
+                        char cSop[128] = {0}, cAcc[128] = {0};
+                        get_csv_field(cLine, 0, cAcc, sizeof(cAcc));
                         get_csv_field(cLine, 4, cSop, sizeof(cSop));
-                        if (strcmp(cSop, sop) == 0) {
-                            get_csv_field(cLine, 0, acc, sizeof(acc));
+                        if (strcmp(cSop, lookupSop) == 0) {
+                            if (!acc[0]) strcpy(acc, cAcc);
                             get_csv_field(cLine, 5, targetFolder, sizeof(targetFolder));
                             get_csv_field(cLine, 6, targetFile, sizeof(targetFile));
                             found = 1;
@@ -1825,8 +2557,9 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             }
 
             if (found && acc[0]) {
-                char path[MAX_PATH];
+                char path[MAX_PATH], tempPath[MAX_PATH];
                 snprintf(path, sizeof(path), "%s\\%s\\%s", g_storageRoot, targetFolder, targetFile);
+                snprintf(tempPath, sizeof(tempPath), "%s\\%s\\temp_%s", g_storageRoot, targetFolder, targetFile);
                 
                 char pName[128] = {0}, pId[128] = {0}, pDob[128] = {0};
                 EnterCriticalSection(&g_csvLock);
@@ -1842,34 +2575,25 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 }
                 LeaveCriticalSection(&g_csvLock);
 
-                FILE *imgFp = fopen(path, "rb");
-                if (imgFp) {
-                    fseek(imgFp, 0, SEEK_END);
-                    long fileLen = ftell(imgFp);
-                    rewind(imgFp);
-                    
-                    uint8_t *fileData = (uint8_t*)malloc(fileLen);
-                    if (fileData) {
-                        if (fread(fileData, 1, fileLen, imgFp) == fileLen) {
-                            fclose(imgFp);
-                            
-                            patch_tag_in_place(fileData, fileLen, 0x0010, 0x0010, pName);
-                            patch_tag_in_place(fileData, fileLen, 0x0010, 0x0020, pId);
-                            patch_tag_in_place(fileData, fileLen, 0x0010, 0x0030, pDob);
-                            patch_tag_in_place(fileData, fileLen, 0x0008, 0x0050, acc);
-                            
-                            FILE *outFp = fopen(path, "wb");
-                            if (outFp) {
-                                fwrite(fileData, 1, fileLen, outFp);
-                                fclose(outFp);
-                            }
-                        } else {
-                            fclose(imgFp);
+                char rules[512];
+                snprintf(rules, sizeof(rules), "0x0008,0x0050=%s`0x0010,0x0010=%s`0x0010,0x0020=%s`0x0010,0x0030=%s", acc, pName, pId, pDob);
+                if (apply_dicom_edits_file(path, tempPath, rules, "`")) {
+                    int success = 0;
+                    for (int retry = 0; retry < 10; retry++) {
+                        if (MoveFileExA(tempPath, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                            success = 1;
+                            break;
                         }
-                        free(fileData);
-                    } else {
-                        fclose(imgFp);
+                        Sleep(100);
                     }
+                    if (!success) {
+                        remove(path);
+                        if (rename(tempPath, path) != 0) {
+                            remove(tempPath);
+                        }
+                    }
+                } else {
+                    remove(tempPath);
                 }
             }
 
@@ -1930,10 +2654,6 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 strcpy(oldAcc, dec);
             }
 
-            char *body = strstr(pBuf, "\r\n\r\n");
-            if (!body) { RemoveClient(clientIdx); return; }
-            body += 4;
-            
             int blen = g_clientBufLen[clientIdx] - (int)(body - pBuf);
             if (blen <= 0) { RemoveClient(clientIdx); return; }
             while (blen > 0 && (body[blen-1] == '\r' || body[blen-1] == '\n' || body[blen-1] == ' ')) { body[--blen] = '\0'; }
@@ -2213,7 +2933,9 @@ int main(int argc, char *argv[]) {
     ServerStart();
     
     hDicomThread = CreateThread(NULL, 0, DicomThread, NULL, 0, NULL); if (hDicomThread) CloseHandle(hDicomThread);
-    
+    HANDLE hBackupThread = CreateThread(NULL, 0, PeriodicBackupThread, NULL, 0, NULL);
+   if (hBackupThread) CloseHandle(hBackupThread);
+
     MSG qmsg;
     for (;;) { 
         ServerLoop(); if (g_bExitApp) break;
@@ -2222,7 +2944,13 @@ int main(int argc, char *argv[]) {
             TranslateMessage(&qmsg); DispatchMessage(&qmsg); 
         } else { Sleep(10); }
     }
-    
+   ExportCSVsOnExit();
+
+   WSACleanup();
+   DeleteCriticalSection(&g_csvLock);
+   DeleteCriticalSection(&g_procCodesLock);
+   DeleteCriticalSection(&g_cstoreLock);
+
     WSACleanup();
     DeleteCriticalSection(&g_csvLock);
     DeleteCriticalSection(&g_procCodesLock);
