@@ -5,7 +5,7 @@
  * AND IS BEING RELEASED INTO THE PUBLIC DOMAIN.
  *
  * Compile:
- *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32 -lgdi32
+ *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32 -lgdi32 -lcomdlg32
  * ============================================================================ */
 
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +21,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
+#include <commdlg.h>
+
+#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -91,7 +94,6 @@ static char   g_pendingEntries[MAX_CLIENTS * ENTRY_SIZE];
 static char g_relayIp[64] = "127.0.0.1";
 static int g_relayPort = 104;
 static char g_relayAet[32] = "REMOTE_PACS";
-
 static char   g_recvBuf[RECV_SIZE];
 static char   g_fileLine[LINE_SIZE];
 static char   g_lineOut[LINE_SIZE];
@@ -112,6 +114,9 @@ static int  g_csvInitialized = 0;
 #define ID_EDT_RELAY_IP    1021
 #define ID_EDT_RELAY_PORT  1022
 #define ID_EDT_RELAY_AET   1023
+#define ID_CHK_RELAY_DEL   1024
+#define ID_EDT_RELAY_CMD   1025
+#define ID_BTN_RELAY_BROWSE 1026
 typedef struct {
     char id[128];
     char procCode[128];
@@ -298,7 +303,6 @@ static const char *szIniRelayMode = "RelayMode";
 static const char *szIniRelayIp = "RelayIp";
 static const char *szIniRelayPort = "RelayPort";
 static const char *szIniRelayAet = "RelayAet";
-
 static const char *szDefAET = "PACS", *szDefTelnetPort = "23", *szDefHttpPort = "80";
 static const char *szDefDicomPort = "1104", *szDefTelnetTimeout = "10", *szDefDebug = "1", *szDefDelPwd = "0";
 static const char *szWndClass = "WorklistTrayClass", *szTrayTip = "RIS Multi-Protocol Server";
@@ -631,6 +635,12 @@ static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title
 
 static const char *szHtmlEnd = "</body></html>";
 
+static char g_relayCmd[MAX_PATH] = "";
+static int g_bRelayDelete = 0;
+
+static const char *szIniRelayCmd = "RelayCmd";
+static const char *szIniRelayDel = "RelayDelete";
+
 /* ===== Logging ===== */
 static void write_log(const char *msg) {
     SYSTEMTIME st;
@@ -646,12 +656,32 @@ static void write_log(const char *msg) {
     fflush(stdout);
 }
 
+/* ===== Relay Logic ===== */
 static DWORD WINAPI RelayThread(LPVOID lpParam) {
     RelayTask* task = (RelayTask*)lpParam;
     
-    write_log("RelayMode: Stub processing started...");
-    Sleep(500); // Stub processing simulated delay
-    write_log("RelayMode: Stub processing finished. Connecting to remote PACS...");
+    if (g_relayCmd[0] != '\0') {
+        write_log("RelayMode: Executing external command...");
+        char cmdLine[MAX_PATH * 2];
+        snprintf(cmdLine, sizeof(cmdLine), "\"%s\" \"%s\"", g_relayCmd, task->filePath);
+        
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        
+        if (CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            write_log("RelayMode: External command finished.");
+        } else {
+            write_log("RelayMode: Failed to execute external command.");
+        }
+    }
+
+    write_log("RelayMode: Connecting to remote PACS...");
 
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
@@ -731,6 +761,42 @@ static DWORD WINAPI RelayThread(LPVOID lpParam) {
 
     closesocket(sock);
     write_log("RelayMode: Successfully relayed image to remote PACS.");
+
+    if (g_bRelayDelete) {
+        remove(task->filePath);
+        
+        char tempCsv[MAX_PATH] = "c-store_temp.csv";
+        int changed = 0;
+        EnterCriticalSection(&g_cstoreLock);
+        FILE *fp = fopen("c-store.csv", "r");
+        FILE *outFp = fopen(tempCsv, "w");
+        if (fp && outFp) {
+            char cLine[1024]; int firstLine = 1;
+            while (fgets(cLine, sizeof(cLine), fp)) {
+                if (firstLine) { fprintf(outFp, "%s", cLine); firstLine = 0; continue; }
+                char cSop[128] = {0};
+                get_csv_field(cLine, 4, cSop, sizeof(cSop));
+                if (strcmp(cSop, task->sopInst) == 0) {
+                    changed = 1;
+                } else {
+                    fprintf(outFp, "%s", cLine);
+                }
+            }
+            fclose(fp);
+            fclose(outFp);
+            if (changed) {
+                remove("c-store.csv");
+                rename(tempCsv, "c-store.csv");
+            } else {
+                remove(tempCsv);
+            }
+        } else {
+            if (fp) fclose(fp);
+            if (outFp) fclose(outFp);
+        }
+        LeaveCriticalSection(&g_cstoreLock);
+        write_log("RelayMode: Deleted local file and tracking entry.");
+    }
     
     free(task);
     return 0;
@@ -1329,9 +1395,11 @@ static void LoadConfig(void) {
     g_DebugLog = GetPrivateProfileInt(szIniServer, szIniDebugLog, 1, szIniFile);
     
     g_bRelayMode = GetPrivateProfileInt(szIniServer, szIniRelayMode, 0, szIniFile);
+    g_bRelayDelete = GetPrivateProfileInt(szIniServer, szIniRelayDel, 0, szIniFile);
     GetPrivateProfileString(szIniServer, szIniRelayIp, "127.0.0.1", g_relayIp, sizeof(g_relayIp), szIniFile);
     g_relayPort = GetPrivateProfileInt(szIniServer, szIniRelayPort, 104, szIniFile);
     GetPrivateProfileString(szIniServer, szIniRelayAet, "REMOTE_PACS", g_relayAet, sizeof(g_relayAet), szIniFile);
+    GetPrivateProfileString(szIniServer, szIniRelayCmd, "", g_relayCmd, sizeof(g_relayCmd), szIniFile);
 }
 
 static void SaveConfig(void) {
@@ -1345,9 +1413,11 @@ static void SaveConfig(void) {
     snprintf(buf, sizeof(buf), "%d", g_DebugLog); WritePrivateProfileString(szIniServer, szIniDebugLog, buf, szIniFile);
     
     snprintf(buf, sizeof(buf), "%d", g_bRelayMode); WritePrivateProfileString(szIniServer, szIniRelayMode, buf, szIniFile);
+    snprintf(buf, sizeof(buf), "%d", g_bRelayDelete); WritePrivateProfileString(szIniServer, szIniRelayDel, buf, szIniFile);
     WritePrivateProfileString(szIniServer, szIniRelayIp, g_relayIp, szIniFile);
     snprintf(buf, sizeof(buf), "%d", g_relayPort); WritePrivateProfileString(szIniServer, szIniRelayPort, buf, szIniFile);
     WritePrivateProfileString(szIniServer, szIniRelayAet, g_relayAet, szIniFile);
+    WritePrivateProfileString(szIniServer, szIniRelayCmd, g_relayCmd, szIniFile);
 }
 
 /* ===== CSV Functions ===== */
@@ -3076,9 +3146,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             HWND hChk = CreateWindow("BUTTON", "Enable Debug Log", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x, y, 150, 20, hWnd, (HMENU)ID_CHK_DEBUG, g_hInstance, NULL);
             SendMessage(hChk, BM_SETCHECK, g_DebugLog ? BST_CHECKED : BST_UNCHECKED, 0); y += 30;
             
-            // New Relay Mode Settings
+            // Relay Mode Settings
             HWND hChkRelay = CreateWindow("BUTTON", "Enable Relay Mode", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x, y, 150, 20, hWnd, (HMENU)ID_CHK_RELAY, g_hInstance, NULL);
-            SendMessage(hChkRelay, BM_SETCHECK, g_bRelayMode ? BST_CHECKED : BST_UNCHECKED, 0); y += 30;
+            SendMessage(hChkRelay, BM_SETCHECK, g_bRelayMode ? BST_CHECKED : BST_UNCHECKED, 0); 
+            HWND hChkRelayDel = CreateWindow("BUTTON", "Delete After Relay", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 160, y, 150, 20, hWnd, (HMENU)ID_CHK_RELAY_DEL, g_hInstance, NULL);
+            SendMessage(hChkRelayDel, BM_SETCHECK, g_bRelayDelete ? BST_CHECKED : BST_UNCHECKED, 0); y += 30;
+            
             CreateWindow("STATIC", "Relay IP:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
             CreateWindow("EDIT", g_relayIp, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, hWnd, (HMENU)ID_EDT_RELAY_IP, g_hInstance, NULL); y += 30;
             snprintf(buf, sizeof(buf), "%d", g_relayPort);
@@ -3086,6 +3159,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_RELAY_PORT, g_hInstance, NULL); y += 30;
             CreateWindow("STATIC", "Relay AET:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
             CreateWindow("EDIT", g_relayAet, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, hWnd, (HMENU)ID_EDT_RELAY_AET, g_hInstance, NULL); y += 30;
+            
+            CreateWindow("STATIC", "Ext Cmd:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", g_relayCmd, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 160, 20, hWnd, (HMENU)ID_EDT_RELAY_CMD, g_hInstance, NULL);
+            CreateWindow("BUTTON", "...", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 255, y, 35, 20, hWnd, (HMENU)ID_BTN_RELAY_BROWSE, g_hInstance, NULL); y += 40;
 
             CreateWindow("BUTTON", g_bRunning ? "Stop Server" : "Start Server", BS_OWNERDRAW | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 50, y, 240, 35, hWnd, (HMENU)ID_BTN_STARTSTOP, g_hInstance, NULL); y += 45;
             CreateWindow("BUTTON", "OK", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 10, y, 80, 25, hWnd, (HMENU)ID_OK, g_hInstance, NULL);
@@ -3109,6 +3186,21 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
                 if (id == ID_BTN_STARTSTOP) { if (g_bRunning) { ServerStop(); SetWindowText((HWND)lParam, "Start Server"); } else { ServerStart(); SetWindowText((HWND)lParam, "Stop Server"); } InvalidateRect((HWND)lParam, NULL, TRUE); }
                 else if (id == ID_CHK_DEBUG) { LRESULT chk = SendMessage((HWND)lParam, BM_GETCHECK, 0, 0); SendMessage((HWND)lParam, BM_SETCHECK, chk == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0); }
                 else if (id == ID_CHK_RELAY) { LRESULT chk = SendMessage((HWND)lParam, BM_GETCHECK, 0, 0); SendMessage((HWND)lParam, BM_SETCHECK, chk == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0); }
+                else if (id == ID_CHK_RELAY_DEL) { LRESULT chk = SendMessage((HWND)lParam, BM_GETCHECK, 0, 0); SendMessage((HWND)lParam, BM_SETCHECK, chk == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0); }
+                else if (id == ID_BTN_RELAY_BROWSE) {
+                    OPENFILENAMEA ofn; char szFile[MAX_PATH] = {0};
+                    ZeroMemory(&ofn, sizeof(ofn));
+                    ofn.lStructSize = sizeof(ofn);
+                    ofn.hwndOwner = hWnd;
+                    ofn.lpstrFile = szFile;
+                    ofn.nMaxFile = sizeof(szFile);
+                    ofn.lpstrFilter = "Executables\0*.exe;*.bat;*.cmd\0All Files\0*.*\0";
+                    ofn.nFilterIndex = 1;
+                    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+                    if (GetOpenFileNameA(&ofn)) {
+                        SetDlgItemText(hWnd, ID_EDT_RELAY_CMD, szFile);
+                    }
+                }
                 else if (id == ID_OK) {
                     GetDlgItemText(hWnd, ID_EDT_AET, g_aeCalled, sizeof(g_aeCalled)); g_aeCalled[sizeof(g_aeCalled) - 1] = '\0';
                     BOOL trans; int tp = GetDlgItemInt(hWnd, ID_EDT_TELNET, &trans, FALSE); if (trans) g_TelnetPort = tp;
@@ -3118,9 +3210,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
                     g_DebugLog = (SendMessage(GetDlgItem(hWnd, ID_CHK_DEBUG), BM_GETCHECK, 0, 0) == BST_CHECKED);
 
                     g_bRelayMode = (SendMessage(GetDlgItem(hWnd, ID_CHK_RELAY), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    g_bRelayDelete = (SendMessage(GetDlgItem(hWnd, ID_CHK_RELAY_DEL), BM_GETCHECK, 0, 0) == BST_CHECKED);
                     GetDlgItemText(hWnd, ID_EDT_RELAY_IP, g_relayIp, sizeof(g_relayIp)); g_relayIp[sizeof(g_relayIp) - 1] = '\0';
                     int rp = GetDlgItemInt(hWnd, ID_EDT_RELAY_PORT, &trans, FALSE); if (trans) g_relayPort = rp;
                     GetDlgItemText(hWnd, ID_EDT_RELAY_AET, g_relayAet, sizeof(g_relayAet)); g_relayAet[sizeof(g_relayAet) - 1] = '\0';
+                    GetDlgItemText(hWnd, ID_EDT_RELAY_CMD, g_relayCmd, sizeof(g_relayCmd)); g_relayCmd[sizeof(g_relayCmd) - 1] = '\0';
 
                     SaveConfig(); DestroyWindow(hWnd);
                 } else if (id == IDCANCEL) { DestroyWindow(hWnd); }
@@ -3132,7 +3226,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
 
 static void ShowSettingsDialog(void) {
     if (g_hSettingsDlg != NULL) { SetForegroundWindow(g_hSettingsDlg); return; }
-    HWND hParent = g_hMainWnd; RECT rc; GetWindowRect(hParent, &rc); int width = 350; int height = 450;
+    HWND hParent = g_hMainWnd; RECT rc; GetWindowRect(hParent, &rc); int width = 350; int height = 500;
     int left = rc.left + (rc.right - rc.left - width) / 2; int top = rc.top + (rc.bottom - rc.top - height) / 2;
     static int classRegistered = 0;
     if (!classRegistered) { WNDCLASSEX wc = {0}; wc.cbSize = sizeof(WNDCLASSEX); wc.lpfnWndProc = SettingsWndProc; wc.hInstance = g_hInstance; wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.lpszClassName = "SettingsWndClass"; RegisterClassEx(&wc); classRegistered = 1; }
