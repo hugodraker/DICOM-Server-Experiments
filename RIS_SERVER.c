@@ -88,6 +88,10 @@ static int    g_clientBufCap[MAX_CLIENTS] = {0};
 static int    g_pendingFlag[MAX_CLIENTS];
 static DWORD  g_pendingSince[MAX_CLIENTS];
 static char   g_pendingEntries[MAX_CLIENTS * ENTRY_SIZE];
+static char g_relayIp[64] = "127.0.0.1";
+static int g_relayPort = 104;
+static char g_relayAet[32] = "REMOTE_PACS";
+
 static char   g_recvBuf[RECV_SIZE];
 static char   g_fileLine[LINE_SIZE];
 static char   g_lineOut[LINE_SIZE];
@@ -104,6 +108,10 @@ static int  g_csvInitialized = 0;
 
 /* Procedure codes lookup table */
 #define MAX_PROC_CODES 256
+#define ID_CHK_RELAY       1020
+#define ID_EDT_RELAY_IP    1021
+#define ID_EDT_RELAY_PORT  1022
+#define ID_EDT_RELAY_AET   1023
 typedef struct {
     char id[128];
     char procCode[128];
@@ -114,6 +122,10 @@ static ProcCodeEntry g_procCodes[MAX_PROC_CODES];
 static int g_procCodeCount = 0;
 static int g_procCodesLoaded = 0;
 
+static unsigned char g_raw_csv_buf[MAX_PATIENT_CSV_MB]; 
+static char g_converted_csv_buf[MAX_PATIENT_CSV_MB];
+/* ===== Relay Mode Globals & Constants ===== */
+static int g_bRelayMode = 0;
 /* Patient directory filtering variables */
 typedef enum { ENCODING_UNKNOWN, ENCODING_UTF8, ENCODING_UTF8_BOM, ENCODING_UTF16_LE, ENCODING_UTF16_BE, ENCODING_ASCII } Encoding;
 
@@ -197,6 +209,62 @@ static void SetNonBlocking(SOCKET sock);
 static char *GetFieldPtr(char *pEntry, int fieldIdx);
 static int get_csv_field(const char* line, int target_col, char* out_buf, int max_len);
 static bool apply_dicom_edits_file(const char *input_file, const char *output_file, const char *rules_str, const char *delim);
+/* ===== DICOM Helpers ===== */
+static bool dicom_add_str(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, const char* s) {
+    uint32_t len = s ? (uint32_t)strlen(s) : 0; uint32_t pad = (len % 2) ? 1 : 0; uint32_t tot = len + pad;
+    if (*off + 8 + (int)tot > max) return false;
+    buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
+    buf[(*off)++]=tot&0xFF; buf[(*off)++]=(tot>>8)&0xFF; buf[(*off)++]=0; buf[(*off)++]=0;
+    if(len>0){memcpy(&buf[*off],s,len);*off+=len;} if(pad) buf[(*off)++]=' '; return true;
+}
+static bool dicom_add_us(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, uint16_t v) {
+    if (*off+10>max) return false; buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
+    buf[(*off)++]=2; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=v&0xFF; buf[(*off)++]=(v>>8)&0xFF; return true;
+}
+static bool dicom_add_ul(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, uint32_t v) {
+    if (*off+12>max) return false; buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
+    buf[(*off)++]=4; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=v&0xFF; buf[(*off)++]=(v>>8)&0xFF; buf[(*off)++]=(v>>16)&0xFF; buf[(*off)++]=(v>>24)&0xFF; return true;
+}
+static bool dicom_seq_hdr(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e) {
+    if (*off+8>max) return false; buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
+    buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; return true;
+}
+static bool dicom_item_hdr(uint8_t* buf, int* off, int max) {
+    if (*off+8>max) return false; buf[(*off)++]=0xFE; buf[(*off)++]=0xFF; buf[(*off)++]=0x00; buf[(*off)++]=0xE0;
+    buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; return true;
+}
+static bool dicom_item_delim(uint8_t* buf, int* off, int max) {
+    if (*off+8>max) return false; buf[(*off)++]=0xFE; buf[(*off)++]=0xFF; buf[(*off)++]=0x0D; buf[(*off)++]=0xE0;
+    buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; return true;
+}
+static bool dicom_seq_delim(uint8_t* buf, int* off, int max) {
+    if (*off+8>max) return false; buf[(*off)++]=0xFE; buf[(*off)++]=0xFF; buf[(*off)++]=0xDD; buf[(*off)++]=0xE0;
+    buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; return true;
+}
+static bool dicom_add_string(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, const char* s) { return dicom_add_str(buf, off, max, g, e, s); }
+static void dicom_get_string(const uint8_t *buf, int len, uint16_t g, uint16_t e, char *out) {
+    uint8_t tg[4] = { (uint8_t)(g & 0xFF), (uint8_t)(g >> 8), (uint8_t)(e & 0xFF), (uint8_t)(e >> 8) };
+    for (int i = 0; i < len - 8; i++) {
+        if (buf[i] == tg[0] && buf[i+1] == tg[1] && buf[i+2] == tg[2] && buf[i+3] == tg[3]) {
+            int vlen = 0; int offset = 0; bool is_vr = false; char v1 = buf[i+4], v2 = buf[i+5];
+            if ((v1 >= 'A' && v1 <= 'Z') && (v2 >= 'A' && v2 <= 'Z')) {
+                if ((v1=='D'&&v2=='A')||(v1=='T'&&v2=='M')||(v1=='C'&&v2=='S')||(v1=='S'&&v2=='H')||
+                    (v1=='L'&&v2=='O')||(v1=='P'&&v2=='N')||(v1=='U'&&v2=='I')||(v1=='A'&&v2=='E')||
+                    (v1=='A'&&v2=='S')||(v1=='I'&&v2=='S')||(v1=='D'&&v2=='S')||(v1=='S'&&v2=='T')||
+                    (v1=='L'&&v2=='T')||(v1=='U'&&v2=='T')||(v1=='O'&&v2=='B')||(v1=='O'&&v2=='W')||
+                    (v1=='S'&&v2=='Q')||(v1=='U'&&v2=='N')||(v1=='F'&&v2=='D')||(v1=='F'&&v2=='L')||
+                    (v1=='S'&&v2=='L')||(v1=='S'&&v2=='S')||(v1=='U'&&v2=='L')||(v1=='U'&&v2=='S')) { is_vr = true; }
+            }
+            if (is_vr) {
+                if ((v1=='O'&&v2=='B') || (v1=='O'&&v2=='W') || (v1=='S'&&v2=='Q') || (v1=='U'&&v2=='N')) {
+                    vlen = buf[i+8] | (buf[i+9]<<8) | (buf[i+10]<<16) | (buf[i+11]<<24); offset = 12;
+                } else { vlen = buf[i+6] | (buf[i+7]<<8); offset = 8; }
+            } else { vlen = buf[i+4] | (buf[i+5]<<8) | (buf[i+6]<<16) | (buf[i+7]<<24); offset = 8; }
+            if (vlen > 0 && vlen < 128 && i + offset + vlen <= len) { memcpy(out, &buf[i+offset], vlen); out[vlen] = '\0'; for(int j=vlen-1; j>=0 && (out[j]==' ' || out[j]=='\0'); j--) out[j]='\0'; return; }
+        }
+    }
+}
+
 static int AccessionEquals(const char *pLine, const char *pAccession);
 static int ParseCSVLineToEntry(const char *pLine, char *pEntry);
 static void RemoveClient(int idx);
@@ -216,9 +284,21 @@ typedef struct {
     char protoCode[128], protoScheme[128], protoMeaning[128], studyUID[128];
 } MWLEntry;
 
+/* ===== Relay Logic ===== */
+typedef struct {
+    char sopClass[128];
+    char sopInst[128];
+    char filePath[MAX_PATH];
+} RelayTask;
+
 static const char *szIniServer = "Server", *szIniAET = "AETitle", *szIniTelnetPort = "TelnetPort";
 static const char *szIniHttpPort = "HttpPort", *szIniDicomPort = "DicomPort";
 static const char *szIniTelnetTimeout = "TelnetTimeout", *szIniDebugLog = "DebugLog", *szIniDelPwd = "DeletePassword";
+static const char *szIniRelayMode = "RelayMode";
+static const char *szIniRelayIp = "RelayIp";
+static const char *szIniRelayPort = "RelayPort";
+static const char *szIniRelayAet = "RelayAet";
+
 static const char *szDefAET = "PACS", *szDefTelnetPort = "23", *szDefHttpPort = "80";
 static const char *szDefDicomPort = "1104", *szDefTelnetTimeout = "10", *szDefDebug = "1", *szDefDelPwd = "0";
 static const char *szWndClass = "WorklistTrayClass", *szTrayTip = "RIS Multi-Protocol Server";
@@ -237,6 +317,43 @@ static const char *szClientDiscFmt = "Client disconnected on socket %u\r\n";
 static const char *szTimeoutFmt = "Client on socket %u timed out\r\n";
 static const char *szPendingFmt = "PENDING Accession %s\r\n";
 static const char *szInsertedFmt = "INSERTED Accession %s\r\n";
+static void send_file_pdata_tf(SOCKET s, uint8_t pc_id, const char* filepath) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return;
+    
+    uint8_t pdu_buf[32768];
+    int chunk_size = 32768 - 12;
+
+    while (1) {
+        uint8_t data_chunk[32768];
+        size_t bytes_read = fread(data_chunk, 1, chunk_size, f);
+        if (bytes_read == 0) break;
+        
+        uint8_t msg_ctrl = feof(f) ? 0x02 : 0x00;
+        
+        uint32_t pdv_len = 2 + (uint32_t)bytes_read; 
+        uint32_t pdu_len = 4 + pdv_len;
+        
+        pdu_buf[0] = 0x04; pdu_buf[1] = 0x00; 
+        pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF; pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
+        pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF; pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
+        pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl; 
+        
+        memcpy(&pdu_buf[12], data_chunk, bytes_read); 
+        send(s, (char*)pdu_buf, 6 + pdu_len, 0);
+        if (feof(f)) break;
+    }
+    fclose(f);
+}
+
+static void send_pdata_tf(SOCKET s, uint8_t pc_id, uint8_t msg_ctrl, const uint8_t* data, uint32_t data_len) {
+    uint32_t pdv_len = 2 + data_len; uint32_t pdu_len = 4 + pdv_len;
+    static uint8_t pdu_buf[BUFFER_SIZE]; if (6 + pdu_len > sizeof(pdu_buf)) return; 
+    pdu_buf[0] = 0x04; pdu_buf[1] = 0x00; pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF; pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
+    pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF; pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
+    pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl; memcpy(&pdu_buf[12], data, data_len); send(s, (char*)pdu_buf, 6 + pdu_len, 0);
+}
+
 static const char *szUpdatedFmt = "UPDATED Accession %s\r\n";
 static const char *szConnected = "Connected to RIS Telnet Server. Waiting for data...\r\n";
 static const char *szPendingResp = "PENDING\r\n", *szInsertedResp = "INSERTED\r\n", *szUpdatedResp = "UPDATED\r\n";
@@ -527,6 +644,96 @@ static void write_log(const char *msg) {
     printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
     fflush(stdout);
+}
+
+static DWORD WINAPI RelayThread(LPVOID lpParam) {
+    RelayTask* task = (RelayTask*)lpParam;
+    
+    write_log("RelayMode: Stub processing started...");
+    Sleep(500); // Stub processing simulated delay
+    write_log("RelayMode: Stub processing finished. Connecting to remote PACS...");
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        free(task);
+        return 0;
+    }
+
+    struct sockaddr_in server;
+    server.sin_addr.s_addr = inet_addr(g_relayIp);
+    server.sin_family = AF_INET;
+    server.sin_port = htons(g_relayPort);
+
+    if (connect(sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        write_log("RelayMode: Connection to remote PACS failed");
+        closesocket(sock);
+        free(task);
+        return 0;
+    }
+
+    uint8_t pdu[1024]; memset(pdu, 0, sizeof(pdu));
+    pdu[0] = 0x01; pdu[1] = 0x00;
+    pdu[6] = 0x00; pdu[7] = 0x01;
+    memset(pdu+10, ' ', 16); memcpy(pdu+10, g_relayAet, strlen(g_relayAet));
+    memset(pdu+26, ' ', 16); memcpy(pdu+26, g_aeCalled, strlen(g_aeCalled));
+    int off = 74;
+    uint8_t app_ctx[] = { 0x10, 0x00, 0x00, 0x15, '1','.','2','.','8','4','0','.','1','0','0','0','8','.','3','.','1','.','1','.','1' };
+    memcpy(pdu+off, app_ctx, sizeof(app_ctx)); off += sizeof(app_ctx);
+    
+    int pc_len_off = off + 2;
+    pdu[off++] = 0x20; pdu[off++] = 0x00; pdu[off++] = 0x00; pdu[off++] = 0x00; 
+    pdu[off++] = 0x01; pdu[off++] = 0x00; pdu[off++] = 0x00; pdu[off++] = 0x00;
+    pdu[off++] = 0x30; pdu[off++] = 0x00; 
+    int as_len = (int)strlen(task->sopClass);
+    pdu[off++] = (as_len >> 8) & 0xFF; pdu[off++] = as_len & 0xFF;
+    memcpy(pdu+off, task->sopClass, as_len); off += as_len;
+    
+    const char* ts_imp = "1.2.840.10008.1.2";
+    int ts_len = (int)strlen(ts_imp);
+    pdu[off++] = 0x40; pdu[off++] = 0x00;
+    pdu[off++] = (ts_len >> 8) & 0xFF; pdu[off++] = ts_len & 0xFF;
+    memcpy(pdu+off, ts_imp, ts_len); off += ts_len;
+
+    int pc_len = off - pc_len_off - 2;
+    pdu[pc_len_off] = (pc_len >> 8) & 0xFF; pdu[pc_len_off+1] = pc_len & 0xFF;
+
+    uint8_t user_info[] = { 0x50, 0x00, 0x00, 0x1E, 0x51, 0x00, 0x00, 0x04, 0x00, 0x00, 0x40, 0x00, 0x52, 0x00, 0x00, 0x12, '1','.','2','.','2','7','6','.','0','.','7','2','3','.','1','.','9','9' };
+    memcpy(pdu+off, user_info, sizeof(user_info)); off += sizeof(user_info);
+
+    uint32_t len = off - 6;
+    pdu[2] = (len >> 24) & 0xFF; pdu[3] = (len >> 16) & 0xFF; pdu[4] = (len >> 8) & 0xFF; pdu[5] = len & 0xFF;
+    send(sock, (char*)pdu, off, 0);
+
+    char resp[4096];
+    recv(sock, resp, sizeof(resp), 0);
+
+    uint8_t cmd_buf[512]; int cmd_len = 0;
+    dicom_add_ul(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0000, 0);
+    dicom_add_string(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0002, task->sopClass);
+    dicom_add_us(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0100, 0x0001);
+    dicom_add_us(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0110, 1);
+    dicom_add_us(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0700, 0x0000);
+    dicom_add_us(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x0800, 0x0101);
+    dicom_add_string(cmd_buf, &cmd_len, sizeof(cmd_buf), 0x0000, 0x1000, task->sopInst);
+    
+    uint32_t gl = cmd_len - 12;
+    cmd_buf[8] = gl & 0xFF; cmd_buf[9] = (gl >> 8) & 0xFF; cmd_buf[10] = (gl >> 16) & 0xFF; cmd_buf[11] = (gl >> 24) & 0xFF;
+    
+    send_pdata_tf(sock, 1, 0x03, cmd_buf, cmd_len);
+
+    send_file_pdata_tf(sock, 1, task->filePath);
+
+    recv(sock, resp, sizeof(resp), 0);
+
+    uint8_t rel_rq[] = { 0x05, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00 };
+    send(sock, (char*)rel_rq, sizeof(rel_rq), 0);
+    recv(sock, resp, sizeof(resp), 0);
+
+    closesocket(sock);
+    write_log("RelayMode: Successfully relayed image to remote PACS.");
+    
+    free(task);
+    return 0;
 }
 
 static void ExportCSVsOnExit(void) {
@@ -1110,6 +1317,7 @@ static void CloseHttpClient(int clientIdx) {
 /* ===== Config ===== */
 static void ResolveIniPath(void) { GetModuleFileName(NULL, szIniFile, MAX_PATH); size_t len = strlen(szIniFile); if (len > 4 && szIniFile[len-4] == '.') { szIniFile[len-3] = 'i'; szIniFile[len-2] = 'n'; szIniFile[len-1] = 'i'; } }
 static void SetAETitle(const char *pSrc) { memset(g_aeCalled, ' ', sizeof(g_aeCalled) - 1); g_aeCalled[sizeof(g_aeCalled) - 1] = '\0'; size_t nLen = strlen(pSrc); if (nLen > sizeof(g_aeCalled) - 1) nLen = sizeof(g_aeCalled) - 1; memcpy(g_aeCalled, pSrc, nLen); }
+/* ===== Config Load & Save ===== */
 static void LoadConfig(void) {
     GetPrivateProfileString(szIniServer, szIniAET, szDefAET, g_iniBuf, sizeof(g_iniBuf), szIniFile); SetAETitle(g_iniBuf);
     GetPrivateProfileString(szIniServer, szIniDelPwd, szDefDelPwd, g_delPwd, sizeof(g_delPwd), szIniFile); TrimInPlace(g_delPwd);
@@ -1119,7 +1327,13 @@ static void LoadConfig(void) {
     g_DicomPort = GetPrivateProfileInt(szIniServer, szIniDicomPort, 1104, szIniFile);
     g_TelnetTimeout = GetPrivateProfileInt(szIniServer, szIniTelnetTimeout, 10, szIniFile);
     g_DebugLog = GetPrivateProfileInt(szIniServer, szIniDebugLog, 1, szIniFile);
+    
+    g_bRelayMode = GetPrivateProfileInt(szIniServer, szIniRelayMode, 0, szIniFile);
+    GetPrivateProfileString(szIniServer, szIniRelayIp, "127.0.0.1", g_relayIp, sizeof(g_relayIp), szIniFile);
+    g_relayPort = GetPrivateProfileInt(szIniServer, szIniRelayPort, 104, szIniFile);
+    GetPrivateProfileString(szIniServer, szIniRelayAet, "REMOTE_PACS", g_relayAet, sizeof(g_relayAet), szIniFile);
 }
+
 static void SaveConfig(void) {
     char buf[32]; WritePrivateProfileString(szIniServer, szIniAET, g_aeCalled, szIniFile);
     WritePrivateProfileString(szIniServer, szIniDelPwd, g_delPwd, szIniFile);
@@ -1129,6 +1343,11 @@ static void SaveConfig(void) {
     snprintf(buf, sizeof(buf), "%d", g_DicomPort); WritePrivateProfileString(szIniServer, szIniDicomPort, buf, szIniFile);
     snprintf(buf, sizeof(buf), "%d", g_TelnetTimeout); WritePrivateProfileString(szIniServer, szIniTelnetTimeout, buf, szIniFile);
     snprintf(buf, sizeof(buf), "%d", g_DebugLog); WritePrivateProfileString(szIniServer, szIniDebugLog, buf, szIniFile);
+    
+    snprintf(buf, sizeof(buf), "%d", g_bRelayMode); WritePrivateProfileString(szIniServer, szIniRelayMode, buf, szIniFile);
+    WritePrivateProfileString(szIniServer, szIniRelayIp, g_relayIp, szIniFile);
+    snprintf(buf, sizeof(buf), "%d", g_relayPort); WritePrivateProfileString(szIniServer, szIniRelayPort, buf, szIniFile);
+    WritePrivateProfileString(szIniServer, szIniRelayAet, g_relayAet, szIniFile);
 }
 
 /* ===== CSV Functions ===== */
@@ -1312,39 +1531,6 @@ static void ExtractMultipartField(char *pBuf, int bufLen, const char *boundary, 
     }
 }
 
-/* ===== DICOM Helpers ===== */
-static bool dicom_add_str(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, const char* s) {
-    uint32_t len = s ? (uint32_t)strlen(s) : 0; uint32_t pad = (len % 2) ? 1 : 0; uint32_t tot = len + pad;
-    if (*off + 8 + (int)tot > max) return false;
-    buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
-    buf[(*off)++]=tot&0xFF; buf[(*off)++]=(tot>>8)&0xFF; buf[(*off)++]=0; buf[(*off)++]=0;
-    if(len>0){memcpy(&buf[*off],s,len);*off+=len;} if(pad) buf[(*off)++]=' '; return true;
-}
-static bool dicom_add_us(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, uint16_t v) {
-    if (*off+10>max) return false; buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
-    buf[(*off)++]=2; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=v&0xFF; buf[(*off)++]=(v>>8)&0xFF; return true;
-}
-static bool dicom_add_ul(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, uint32_t v) {
-    if (*off+12>max) return false; buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
-    buf[(*off)++]=4; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=0; buf[(*off)++]=v&0xFF; buf[(*off)++]=(v>>8)&0xFF; buf[(*off)++]=(v>>16)&0xFF; buf[(*off)++]=(v>>24)&0xFF; return true;
-}
-static bool dicom_seq_hdr(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e) {
-    if (*off+8>max) return false; buf[(*off)++]=g&0xFF; buf[(*off)++]=(g>>8)&0xFF; buf[(*off)++]=e&0xFF; buf[(*off)++]=(e>>8)&0xFF;
-    buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; return true;
-}
-static bool dicom_item_hdr(uint8_t* buf, int* off, int max) {
-    if (*off+8>max) return false; buf[(*off)++]=0xFE; buf[(*off)++]=0xFF; buf[(*off)++]=0x00; buf[(*off)++]=0xE0;
-    buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; buf[(*off)++]=0xFF; return true;
-}
-static bool dicom_item_delim(uint8_t* buf, int* off, int max) {
-    if (*off+8>max) return false; buf[(*off)++]=0xFE; buf[(*off)++]=0xFF; buf[(*off)++]=0x0D; buf[(*off)++]=0xE0;
-    buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; return true;
-}
-static bool dicom_seq_delim(uint8_t* buf, int* off, int max) {
-    if (*off+8>max) return false; buf[(*off)++]=0xFE; buf[(*off)++]=0xFF; buf[(*off)++]=0xDD; buf[(*off)++]=0xE0;
-    buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; buf[(*off)++]=0x00; return true;
-}
-static bool dicom_add_string(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, const char* s) { return dicom_add_str(buf, off, max, g, e, s); }
 static void trim_mwl(char *str) {
     if (!str) return; char *p = str; while (*p == ' ' || *p == '"') p++; if (p != str) memmove(str, p, strlen(p) + 1);
     int len = (int)strlen(str); while (len > 0 && (str[len-1] == ' ' || str[len-1] == '"' || str[len-1] == '\r' || str[len-1] == '\n')) str[--len] = '\0';
@@ -1359,37 +1545,6 @@ static void parse_csv_line_mwl(char *line, MWLEntry *e) {
         else { strncpy(fields[i], start, 127); fields[i][127] = '\0'; trim_mwl(fields[i]); break; }
     }
 }
-static void send_pdata_tf(SOCKET s, uint8_t pc_id, uint8_t msg_ctrl, const uint8_t* data, uint32_t data_len) {
-    uint32_t pdv_len = 2 + data_len; uint32_t pdu_len = 4 + pdv_len;
-    static uint8_t pdu_buf[BUFFER_SIZE]; if (6 + pdu_len > sizeof(pdu_buf)) return; 
-    pdu_buf[0] = 0x04; pdu_buf[1] = 0x00; pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF; pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
-    pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF; pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
-    pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl; memcpy(&pdu_buf[12], data, data_len); send(s, (char*)pdu_buf, 6 + pdu_len, 0);
-}
-
-static void dicom_get_string(const uint8_t *buf, int len, uint16_t g, uint16_t e, char *out) {
-    uint8_t tg[4] = { (uint8_t)(g & 0xFF), (uint8_t)(g >> 8), (uint8_t)(e & 0xFF), (uint8_t)(e >> 8) };
-    for (int i = 0; i < len - 8; i++) {
-        if (buf[i] == tg[0] && buf[i+1] == tg[1] && buf[i+2] == tg[2] && buf[i+3] == tg[3]) {
-            int vlen = 0; int offset = 0; bool is_vr = false; char v1 = buf[i+4], v2 = buf[i+5];
-            if ((v1 >= 'A' && v1 <= 'Z') && (v2 >= 'A' && v2 <= 'Z')) {
-                if ((v1=='D'&&v2=='A')||(v1=='T'&&v2=='M')||(v1=='C'&&v2=='S')||(v1=='S'&&v2=='H')||
-                    (v1=='L'&&v2=='O')||(v1=='P'&&v2=='N')||(v1=='U'&&v2=='I')||(v1=='A'&&v2=='E')||
-                    (v1=='A'&&v2=='S')||(v1=='I'&&v2=='S')||(v1=='D'&&v2=='S')||(v1=='S'&&v2=='T')||
-                    (v1=='L'&&v2=='T')||(v1=='U'&&v2=='T')||(v1=='O'&&v2=='B')||(v1=='O'&&v2=='W')||
-                    (v1=='S'&&v2=='Q')||(v1=='U'&&v2=='N')||(v1=='F'&&v2=='D')||(v1=='F'&&v2=='L')||
-                    (v1=='S'&&v2=='L')||(v1=='S'&&v2=='S')||(v1=='U'&&v2=='L')||(v1=='U'&&v2=='S')) { is_vr = true; }
-            }
-            if (is_vr) {
-                if ((v1=='O'&&v2=='B') || (v1=='O'&&v2=='W') || (v1=='S'&&v2=='Q') || (v1=='U'&&v2=='N')) {
-                    vlen = buf[i+8] | (buf[i+9]<<8) | (buf[i+10]<<16) | (buf[i+11]<<24); offset = 12;
-                } else { vlen = buf[i+6] | (buf[i+7]<<8); offset = 8; }
-            } else { vlen = buf[i+4] | (buf[i+5]<<8) | (buf[i+6]<<16) | (buf[i+7]<<24); offset = 8; }
-            if (vlen > 0 && vlen < 128 && i + offset + vlen <= len) { memcpy(out, &buf[i+offset], vlen); out[vlen] = '\0'; for(int j=vlen-1; j>=0 && (out[j]==' ' || out[j]=='\0'); j--) out[j]='\0'; return; }
-        }
-    }
-}
-
 /* ===== DICOM Protocol Handlers ===== */
 static void handle_association_rq(SOCKET clientSocket, char* buffer, int bytesRead) {
     write_log("Parsing A-ASSOCIATE-RQ...");
@@ -1482,16 +1637,39 @@ static void handle_c_find_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id
     uint32_t gl = cmd_len - 12; cmd_buf[8] = gl & 0xFF; cmd_buf[9] = (gl >> 8) & 0xFF; cmd_buf[10] = (gl >> 16) & 0xFF; cmd_buf[11] = (gl >> 24) & 0xFF; send_pdata_tf(clientSocket, pc_id, 0x03, cmd_buf, cmd_len);
 }
 
+/* ===== Handle C-STORE-RQ Updated ===== */
 static void handle_c_store_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_id, uint8_t *cmd_buf, int cmd_len, uint8_t *data_buf, int data_len) {
     char sopClass[128] = {0}, sopInst[128] = {0}, acc[128] = {0}, pName[128] = {0}, pId[128] = {0}, mod[128] = {0}, studyDesc[128] = {0};
+    char pDob[128] = {0}, pSex[128] = {0}, reqPhys[128] = {0}, reqProcDesc[128] = {0};
+    char reason[128] = {0}, procId[128] = {0}, stationAe[128] = {0}, studyDate[128] = {0};
+    char studyTime[128] = {0}, perfPhys[128] = {0}, spsDesc[128] = {0}, spsId[128] = {0};
+    char stationName[128] = {0}, refPhys[128] = {0}, studyUID[128] = {0};
+
     dicom_get_string(cmd_buf, cmd_len, 0x0000, 0x0002, sopClass); 
     dicom_get_string(cmd_buf, cmd_len, 0x0000, 0x1000, sopInst);
     if (sopInst[0] == '\0') dicom_get_string(data_buf, data_len, 0x0008, 0x0018, sopInst);
+    
     dicom_get_string(data_buf, data_len, 0x0008, 0x0050, acc); 
     dicom_get_string(data_buf, data_len, 0x0010, 0x0010, pName);
     dicom_get_string(data_buf, data_len, 0x0010, 0x0020, pId); 
     dicom_get_string(data_buf, data_len, 0x0008, 0x0060, mod);
     dicom_get_string(data_buf, data_len, 0x0008, 0x1030, studyDesc);
+    
+    dicom_get_string(data_buf, data_len, 0x0010, 0x0030, pDob);
+    dicom_get_string(data_buf, data_len, 0x0010, 0x0040, pSex);
+    dicom_get_string(data_buf, data_len, 0x0032, 0x1032, reqPhys);
+    dicom_get_string(data_buf, data_len, 0x0032, 0x1060, reqProcDesc);
+    dicom_get_string(data_buf, data_len, 0x0040, 0x1002, reason);
+    dicom_get_string(data_buf, data_len, 0x0040, 0x1001, procId);
+    dicom_get_string(data_buf, data_len, 0x0040, 0x0001, stationAe);
+    dicom_get_string(data_buf, data_len, 0x0008, 0x0020, studyDate);
+    dicom_get_string(data_buf, data_len, 0x0008, 0x0030, studyTime);
+    dicom_get_string(data_buf, data_len, 0x0008, 0x1050, perfPhys);
+    dicom_get_string(data_buf, data_len, 0x0040, 0x0007, spsDesc);
+    dicom_get_string(data_buf, data_len, 0x0040, 0x0009, spsId);
+    dicom_get_string(data_buf, data_len, 0x0008, 0x1010, stationName);
+    dicom_get_string(data_buf, data_len, 0x0008, 0x0090, refPhys);
+    dicom_get_string(data_buf, data_len, 0x0020, 0x000D, studyUID);
 
     if (acc[0] == '\0') {
         int maxVal = 0;
@@ -1520,21 +1698,79 @@ static void handle_c_store_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_i
         fclose(fp);
         RecordStoredImage(acc, pName, pId, sopInst, folder, filename, mod, data_len);
         
+        if (g_bRelayMode) {
+            RelayTask* task = (RelayTask*)malloc(sizeof(RelayTask));
+            if (task) {
+                strncpy(task->sopClass, sopClass[0] ? sopClass : "1.2.840.10008.5.1.4.1.1.2", 127);
+                strncpy(task->sopInst, sopInst, 127);
+                strncpy(task->filePath, path, MAX_PATH - 1);
+                HANDLE hThread = CreateThread(NULL, 0, RelayThread, task, 0, NULL);
+                if (hThread) CloseHandle(hThread);
+            }
+        }
+        
         EnsureCsvInitialized();
         EnterCriticalSection(&g_csvLock);
         int found = 0;
         for (int i = 1; i < g_csvRows; i++) {
-            if (AccessionEquals(g_csvData[i], acc)) { found = 1; break; }
+            if (AccessionEquals(g_csvData[i], acc)) { 
+                found = 1; 
+                char entry[ENTRY_SIZE];
+                ParseCSVLineToEntry(g_csvData[i], entry);
+                int changed = 0;
+                
+                if (pName[0] && !GetFieldPtr(entry, 0)[0]) { strncpy(GetFieldPtr(entry, 0), pName, FIELD_SIZE - 1); changed = 1; }
+                if (pId[0] && !GetFieldPtr(entry, 1)[0]) { strncpy(GetFieldPtr(entry, 1), pId, FIELD_SIZE - 1); changed = 1; }
+                if (pDob[0] && !GetFieldPtr(entry, 2)[0]) { strncpy(GetFieldPtr(entry, 2), pDob, FIELD_SIZE - 1); changed = 1; }
+                if (pSex[0] && !GetFieldPtr(entry, 3)[0]) { strncpy(GetFieldPtr(entry, 3), pSex, FIELD_SIZE - 1); changed = 1; }
+                if (reqPhys[0] && !GetFieldPtr(entry, 4)[0]) { strncpy(GetFieldPtr(entry, 4), reqPhys, FIELD_SIZE - 1); changed = 1; }
+                if (reqProcDesc[0] && !GetFieldPtr(entry, 6)[0]) { strncpy(GetFieldPtr(entry, 6), reqProcDesc, FIELD_SIZE - 1); changed = 1; }
+                if (reason[0] && !GetFieldPtr(entry, 7)[0]) { strncpy(GetFieldPtr(entry, 7), reason, FIELD_SIZE - 1); changed = 1; }
+                if (procId[0] && !GetFieldPtr(entry, 9)[0]) { strncpy(GetFieldPtr(entry, 9), procId, FIELD_SIZE - 1); changed = 1; }
+                if (stationAe[0] && !GetFieldPtr(entry, 11)[0]) { strncpy(GetFieldPtr(entry, 11), stationAe, FIELD_SIZE - 1); changed = 1; }
+                if (studyDate[0] && !GetFieldPtr(entry, 12)[0]) { strncpy(GetFieldPtr(entry, 12), studyDate, FIELD_SIZE - 1); changed = 1; }
+                if (studyTime[0] && !GetFieldPtr(entry, 13)[0]) { strncpy(GetFieldPtr(entry, 13), studyTime, FIELD_SIZE - 1); changed = 1; }
+                if (perfPhys[0] && !GetFieldPtr(entry, 14)[0]) { strncpy(GetFieldPtr(entry, 14), perfPhys, FIELD_SIZE - 1); changed = 1; }
+                if (spsDesc[0] && !GetFieldPtr(entry, 15)[0]) { strncpy(GetFieldPtr(entry, 15), spsDesc, FIELD_SIZE - 1); changed = 1; }
+                if (spsId[0] && !GetFieldPtr(entry, 16)[0]) { strncpy(GetFieldPtr(entry, 16), spsId, FIELD_SIZE - 1); changed = 1; }
+                if (stationName[0] && !GetFieldPtr(entry, 17)[0]) { strncpy(GetFieldPtr(entry, 17), stationName, FIELD_SIZE - 1); changed = 1; }
+                if (mod[0] && !GetFieldPtr(entry, 20)[0]) { strncpy(GetFieldPtr(entry, 20), mod, FIELD_SIZE - 1); changed = 1; }
+                if (refPhys[0] && !GetFieldPtr(entry, 21)[0]) { strncpy(GetFieldPtr(entry, 21), refPhys, FIELD_SIZE - 1); changed = 1; }
+                if (studyDesc[0] && !GetFieldPtr(entry, 22)[0]) { strncpy(GetFieldPtr(entry, 22), studyDesc, FIELD_SIZE - 1); changed = 1; }
+                if (studyUID[0] && !GetFieldPtr(entry, 26)[0]) { strncpy(GetFieldPtr(entry, 26), studyUID, FIELD_SIZE - 1); changed = 1; }
+
+                if (changed) {
+                    char lineOut[LINE_SIZE];
+                    BuildCSVLineFromEntry(entry, lineOut);
+                    strncpy(g_csvData[i], lineOut, LINE_SIZE - 1);
+                }
+                break; 
+            }
         }
         if (!found) {
             char newEntry[ENTRY_SIZE];
             memset(newEntry, 0, ENTRY_SIZE);
             strncpy(GetFieldPtr(newEntry, 0), pName[0] ? pName : "Unknown Patient", FIELD_SIZE - 1);
             strncpy(GetFieldPtr(newEntry, 1), pId[0] ? pId : "UNKNOWN", FIELD_SIZE - 1);
+            if (pDob[0]) strncpy(GetFieldPtr(newEntry, 2), pDob, FIELD_SIZE - 1);
+            if (pSex[0]) strncpy(GetFieldPtr(newEntry, 3), pSex, FIELD_SIZE - 1);
+            if (reqPhys[0]) strncpy(GetFieldPtr(newEntry, 4), reqPhys, FIELD_SIZE - 1);
+            if (reqProcDesc[0]) strncpy(GetFieldPtr(newEntry, 6), reqProcDesc, FIELD_SIZE - 1);
+            if (reason[0]) strncpy(GetFieldPtr(newEntry, 7), reason, FIELD_SIZE - 1);
             strncpy(GetFieldPtr(newEntry, 8), acc, FIELD_SIZE - 1);
+            if (procId[0]) strncpy(GetFieldPtr(newEntry, 9), procId, FIELD_SIZE - 1);
+            if (stationAe[0]) strncpy(GetFieldPtr(newEntry, 11), stationAe, FIELD_SIZE - 1);
+            if (studyDate[0]) strncpy(GetFieldPtr(newEntry, 12), studyDate, FIELD_SIZE - 1);
+            if (studyTime[0]) strncpy(GetFieldPtr(newEntry, 13), studyTime, FIELD_SIZE - 1);
+            if (perfPhys[0]) strncpy(GetFieldPtr(newEntry, 14), perfPhys, FIELD_SIZE - 1);
+            if (spsDesc[0]) strncpy(GetFieldPtr(newEntry, 15), spsDesc, FIELD_SIZE - 1);
+            if (spsId[0]) strncpy(GetFieldPtr(newEntry, 16), spsId, FIELD_SIZE - 1);
+            if (stationName[0]) strncpy(GetFieldPtr(newEntry, 17), stationName, FIELD_SIZE - 1);
             strncpy(GetFieldPtr(newEntry, 19), "5", FIELD_SIZE - 1); 
             strncpy(GetFieldPtr(newEntry, 20), mod[0] ? mod : "OT", FIELD_SIZE - 1);
-            strncpy(GetFieldPtr(newEntry, 22), studyDesc, FIELD_SIZE - 1);
+            if (refPhys[0]) strncpy(GetFieldPtr(newEntry, 21), refPhys, FIELD_SIZE - 1);
+            if (studyDesc[0]) strncpy(GetFieldPtr(newEntry, 22), studyDesc, FIELD_SIZE - 1);
+            if (studyUID[0]) strncpy(GetFieldPtr(newEntry, 26), studyUID, FIELD_SIZE - 1);
             
             char lineOut[LINE_SIZE];
             BuildCSVLineFromEntry(newEntry, lineOut);
@@ -1691,8 +1927,6 @@ static int get_csv_field(const char* line, int target_col, char* out_buf, int ma
     } out_buf[out_pos] = '\0'; TrimInPlace(out_buf); return (current_col == target_col);
 }
 
-static unsigned char g_raw_csv_buf[MAX_PATIENT_CSV_MB]; 
-static char g_converted_csv_buf[MAX_PATIENT_CSV_MB];
 static char* load_and_convert_csv(const char* filename, long* data_len) {
     FILE* fp = fopen(filename, "rb"); if (!fp) return NULL; fseek(fp, 0, SEEK_END); long file_size = ftell(fp); rewind(fp);
     if (file_size >= (long)sizeof(g_raw_csv_buf) - 4) { fclose(fp); return NULL; }
@@ -2820,6 +3054,7 @@ static void ServerLoop(void) {
 
 /* ===== Settings Dialog Handler ===== */
 static BOOL CALLBACK SetFontProc(HWND hChild, LPARAM lParam) { SendMessage(hChild, WM_SETFONT, (WPARAM)lParam, TRUE); return TRUE; }
+/* ===== Dialog Box Updating ===== */
 static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
@@ -2840,6 +3075,18 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_TIMEOUT, g_hInstance, NULL); y += 30;
             HWND hChk = CreateWindow("BUTTON", "Enable Debug Log", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x, y, 150, 20, hWnd, (HMENU)ID_CHK_DEBUG, g_hInstance, NULL);
             SendMessage(hChk, BM_SETCHECK, g_DebugLog ? BST_CHECKED : BST_UNCHECKED, 0); y += 30;
+            
+            // New Relay Mode Settings
+            HWND hChkRelay = CreateWindow("BUTTON", "Enable Relay Mode", BS_CHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x, y, 150, 20, hWnd, (HMENU)ID_CHK_RELAY, g_hInstance, NULL);
+            SendMessage(hChkRelay, BM_SETCHECK, g_bRelayMode ? BST_CHECKED : BST_UNCHECKED, 0); y += 30;
+            CreateWindow("STATIC", "Relay IP:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", g_relayIp, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, hWnd, (HMENU)ID_EDT_RELAY_IP, g_hInstance, NULL); y += 30;
+            snprintf(buf, sizeof(buf), "%d", g_relayPort);
+            CreateWindow("STATIC", "Relay Port:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", buf, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, x + 90, y, 60, 20, hWnd, (HMENU)ID_EDT_RELAY_PORT, g_hInstance, NULL); y += 30;
+            CreateWindow("STATIC", "Relay AET:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hWnd, NULL, g_hInstance, NULL);
+            CreateWindow("EDIT", g_relayAet, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, x + 90, y, 200, 20, hWnd, (HMENU)ID_EDT_RELAY_AET, g_hInstance, NULL); y += 30;
+
             CreateWindow("BUTTON", g_bRunning ? "Stop Server" : "Start Server", BS_OWNERDRAW | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 50, y, 240, 35, hWnd, (HMENU)ID_BTN_STARTSTOP, g_hInstance, NULL); y += 45;
             CreateWindow("BUTTON", "OK", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 10, y, 80, 25, hWnd, (HMENU)ID_OK, g_hInstance, NULL);
             CreateWindow("BUTTON", "Cancel", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, x + 100, y, 80, 25, hWnd, (HMENU)IDCANCEL, g_hInstance, NULL);
@@ -2861,6 +3108,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
                 int id = LOWORD(wParam);
                 if (id == ID_BTN_STARTSTOP) { if (g_bRunning) { ServerStop(); SetWindowText((HWND)lParam, "Start Server"); } else { ServerStart(); SetWindowText((HWND)lParam, "Stop Server"); } InvalidateRect((HWND)lParam, NULL, TRUE); }
                 else if (id == ID_CHK_DEBUG) { LRESULT chk = SendMessage((HWND)lParam, BM_GETCHECK, 0, 0); SendMessage((HWND)lParam, BM_SETCHECK, chk == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0); }
+                else if (id == ID_CHK_RELAY) { LRESULT chk = SendMessage((HWND)lParam, BM_GETCHECK, 0, 0); SendMessage((HWND)lParam, BM_SETCHECK, chk == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0); }
                 else if (id == ID_OK) {
                     GetDlgItemText(hWnd, ID_EDT_AET, g_aeCalled, sizeof(g_aeCalled)); g_aeCalled[sizeof(g_aeCalled) - 1] = '\0';
                     BOOL trans; int tp = GetDlgItemInt(hWnd, ID_EDT_TELNET, &trans, FALSE); if (trans) g_TelnetPort = tp;
@@ -2868,6 +3116,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
                     int dp = GetDlgItemInt(hWnd, ID_EDT_DICOM, &trans, FALSE); if (trans) g_DicomPort = dp;
                     int to = GetDlgItemInt(hWnd, ID_EDT_TIMEOUT, &trans, FALSE); if (trans) g_TelnetTimeout = to;
                     g_DebugLog = (SendMessage(GetDlgItem(hWnd, ID_CHK_DEBUG), BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+                    g_bRelayMode = (SendMessage(GetDlgItem(hWnd, ID_CHK_RELAY), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    GetDlgItemText(hWnd, ID_EDT_RELAY_IP, g_relayIp, sizeof(g_relayIp)); g_relayIp[sizeof(g_relayIp) - 1] = '\0';
+                    int rp = GetDlgItemInt(hWnd, ID_EDT_RELAY_PORT, &trans, FALSE); if (trans) g_relayPort = rp;
+                    GetDlgItemText(hWnd, ID_EDT_RELAY_AET, g_relayAet, sizeof(g_relayAet)); g_relayAet[sizeof(g_relayAet) - 1] = '\0';
+
                     SaveConfig(); DestroyWindow(hWnd);
                 } else if (id == IDCANCEL) { DestroyWindow(hWnd); }
             } return 0;
@@ -2878,13 +3132,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
 
 static void ShowSettingsDialog(void) {
     if (g_hSettingsDlg != NULL) { SetForegroundWindow(g_hSettingsDlg); return; }
-    HWND hParent = g_hMainWnd; RECT rc; GetWindowRect(hParent, &rc); int width = 350; int height = 320;
+    HWND hParent = g_hMainWnd; RECT rc; GetWindowRect(hParent, &rc); int width = 350; int height = 450;
     int left = rc.left + (rc.right - rc.left - width) / 2; int top = rc.top + (rc.bottom - rc.top - height) / 2;
     static int classRegistered = 0;
     if (!classRegistered) { WNDCLASSEX wc = {0}; wc.cbSize = sizeof(WNDCLASSEX); wc.lpfnWndProc = SettingsWndProc; wc.hInstance = g_hInstance; wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.lpszClassName = "SettingsWndClass"; RegisterClassEx(&wc); classRegistered = 1; }
     g_hSettingsDlg = CreateWindowEx(0, "SettingsWndClass", "Server Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, left, top, width, height, hParent, NULL, g_hInstance, NULL);
 }
-
 /* ===== Win32 UI ===== */
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_TRAYICON) { if ((UINT)lParam == WM_RBUTTONUP || (UINT)lParam == WM_LBUTTONUP) { POINT pt; GetCursorPos(&pt); SetForegroundWindow(hWnd); TrackPopupMenu(g_hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL); } return 0; }
