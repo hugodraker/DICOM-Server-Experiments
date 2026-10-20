@@ -6,6 +6,9 @@
  *
  * Compile:
  *   gcc -Os -s -o RIS_SERVER.exe RIS_SERVER.c -lws2_32 -luser32 -lshell32 -lkernel32 -lgdi32 -lcomdlg32
+ *
+ * THIS WORK IS NOT FIT FOR ANY FUNCTION OR PURPOSE, COMES WITH NO WARRANTY,
+ * AND IS BEING RELEASED INTO THE PUBLIC DOMAIN.
  * ============================================================================ */
 
 #define WIN32_LEAN_AND_MEAN
@@ -22,7 +25,6 @@
 #include <stdbool.h>
 #include <time.h>
 #include <commdlg.h>
-
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
@@ -214,6 +216,152 @@ static void SetNonBlocking(SOCKET sock);
 static char *GetFieldPtr(char *pEntry, int fieldIdx);
 static int get_csv_field(const char* line, int target_col, char* out_buf, int max_len);
 static bool apply_dicom_edits_file(const char *input_file, const char *output_file, const char *rules_str, const char *delim);
+static int AccessionEquals(const char *pLine, const char *pAccession);
+static int ParseCSVLineToEntry(const char *pLine, char *pEntry);
+static void RemoveClient(int idx);
+static void ProcessHttpClient(int clientIdx, char *pBuf);
+
+static char* patients_csv_data = NULL;
+static long patients_csv_data_len = 0;
+static int pts_name_col_idx = -1;
+static int pts_id_col_idx = 0;
+static int pts_birthdate_col_idx = -1;
+static int pts_sex_col_idx = -1;
+
+typedef struct {
+    char patientName[128], patientID[128], dob[128], sex[128], reqPhys[128], reqSvc[128], procDesc[128], procReason[128];
+    char accNum[128], procID[128], procPri[128], aeTitle[128], spsDate[128], spsTime[128], perfPhys[128];
+    char spsDesc[128], spsID[128], station[128], loc[128], status[128], modality[128], refPhys[128], studyDesc[128];
+    char protoCode[128], protoScheme[128], protoMeaning[128], studyUID[128];
+} MWLEntry;
+
+/* ===== Relay Logic ===== */
+typedef struct {
+    char sopClass[128];
+    char sopInst[128];
+    char filePath[MAX_PATH];
+} RelayTask;
+
+static const char *szIniServer = "Server", *szIniAET = "AETitle", *szIniTelnetPort = "TelnetPort";
+static const char *szIniHttpPort = "HttpPort", *szIniDicomPort = "DicomPort";
+static const char *szIniTelnetTimeout = "TelnetTimeout", *szIniDebugLog = "DebugLog", *szIniDelPwd = "DeletePassword";
+static const char *szIniRelayMode = "RelayMode";
+static const char *szIniRelayIp = "RelayIp";
+static const char *szIniRelayPort = "RelayPort";
+static const char *szIniRelayAet = "RelayAet";
+static const char *szDefAET = "PACS", *szDefTelnetPort = "23", *szDefHttpPort = "80";
+static const char *szDefDicomPort = "1104", *szDefTelnetTimeout = "10", *szDefDebug = "1", *szDefDelPwd = "0";
+static const char *szWndClass = "WorklistTrayClass", *szTrayTip = "RIS Multi-Protocol Server";
+static const char *szMenuStart = "Start Server", *szMenuStop = "Stop Server", *szMenuShow = "Show Console", *szMenuExit = "Exit";
+static const char *szMenuSettings = "Settings";
+static const char *szStartup = "RIS Server starting...\r\n";
+static const char *szConfigFmt = "Config: AET=%s TelnetPort=%u HttpPort=%u DicomPort=%u Timeout=%u DebugLog=%u\r\n";
+static const char *szListenFmt = "Telnet listening on port %u\r\n";
+static const char *szListenHttpFmt = "HTTP listening on port %u\r\n";
+static const char *szListenDicomFmt = "DICOM SCP listening on port %u\r\n";
+static const char *szListenFailFmt = "ERROR: Failed to listen on port %u\r\n";
+static const char *szClientConnFmt = "Telnet Client connected on socket %u\r\n";
+static const char *szHttpConnFmt = "HTTP Client connected on socket %u\r\n";
+static const char *szDicomConnFmt = "DICOM SCU connected.\r\n";
+static const char *szClientDiscFmt = "Client disconnected on socket %u\r\n";
+static const char *szTimeoutFmt = "Client on socket %u timed out\r\n";
+static const char *szPendingFmt = "PENDING Accession %s\r\n";
+static const char *szInsertedFmt = "INSERTED Accession %s\r\n";
+static const char *szUpdatedFmt = "UPDATED Accession %s\r\n";
+static const char *szConnected = "Connected to RIS Telnet Server. Waiting for data...\r\n";
+static const char *szPendingResp = "PENDING\r\n", *szInsertedResp = "INSERTED\r\n", *szUpdatedResp = "UPDATED\r\n";
+static const char *szInvalidResp = "INVALID LINE\r\n", *szServerStarted = "Server STARTED\r\n", *szServerStopped = "Server STOPPED\r\n";
+static const char *szHttp200OK = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
+static const char *szCSVHeader = "PatientName,PatientID,BirthDate,Sex,ReqPhys,ReqSvc,ProcDesc,Reason,Accession,ProcID,Priority,StationAE,StartDate,StartTime,PerfPhys,SPSDesc,SPSID,StationName,Location,Status,Modality,RefPhys,StudyDesc,ProtoCode,ProtoScheme,ProtoMeaning,StudyUID";
+static const char *szFakePatient = ""; 
+
+static const unsigned char szViewerHtml[] = {
+    #embed "dicomviewer.js"
+    , 0
+};
+
+static const char *szHtmlFormsTop = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
+"<button type='button' onclick='newPatient()' class='top-btn bg-green'>New Patient</button>"
+"</div><hr><form id='manForm'><input type='hidden' id='oldAcc' name='oldAcc' value=''>";
+
+static const char *szHtmlFormsInputs = "<input type='text' name='PatientName' placeholder='Patient Name'> <input type='text' name='PatientID' placeholder='Patient ID'> Birth: <input type='date' name='BirthDate'> <select name='Sex'><option value=''>Sex</option><option value='M'>M</option><option value='F'>F</option><option value='O'>O</option></select><br>"
+"<input type='text' name='ReqPhys' placeholder='Req Phys'> <input type='text' name='ReqSvc' placeholder='Req Svc'> <input type='text' name='ProcDesc' placeholder='Proc Desc'> <input type='text' name='Reason' placeholder='Reason'><br>"
+"<input type='text' name='Accession' placeholder='Accession'> <input type='text' name='ProcID' placeholder='Proc ID'> <select name='Priority'><option value='LOW' selected>LOW</option><option value='MEDIUM'>MEDIUM</option><option value='ROUTINE'>ROUTINE</option><option value='HIGH'>HIGH</option></select> <input type='text' name='StationAE' placeholder='Station AE'><br>"
+"Start: <input type='date' name='StartDate'> Time: <input type='time' name='StartTime'> <input type='text' name='PerfPhys' placeholder='Perf Phys'> <input type='text' name='SPSDesc' placeholder='SPS Desc'><br>"
+"<input type='text' name='SPSID' placeholder='SPS ID'> ";
+
+static const char *szHtmlForms2 = " <select name='Status'><option value='0'>NONE</option><option value='1' selected>SCHEDULED</option><option value='2'>ARRIVED</option><option value='3'>READY</option><option value='4'>STARTED</option><option value='5'>DEPARTED</option></select><br>"
+"<input type='text' name='RefPhys' placeholder='Ref Phys'> <input type='text' name='StudyDesc' placeholder='Study Desc'><br>"
+"<input type='text' name='ProtoCode' placeholder='Proto Code'> <input type='text' name='ProtoScheme' placeholder='Proto Scheme'> <input type='text' name='ProtoMeaning' placeholder='Proto Meaning'><br>"
+"<input type='text' name='StudyUID' placeholder='Study UID' style='width:300px;'><br>"
+"<div style='margin-top:15px; display:flex; gap:10px;'>"
+"<button type='button' onclick='sendMan()' class='top-btn bg-green'>Add/Edit Patient</button> "
+"<button type='button' onclick='nxtA()' class='top-btn bg-blue'>Next Accession</button> "
+"<button type='button' onclick='multiStudy()' class='top-btn bg-blue'>Stub</button> "
+"<button type='button' onclick='delP()' class='top-btn bg-red'>Delete Patient</button></div></form><hr>"
+"<br><div style='text-align:right;'><a href='/settings' style='color:#2196F3; font-weight:bold; font-size:16px; margin-right:20px; text-decoration:none;'>Settings</a></div>";
+
+static const unsigned char szHtmlStart[] = {
+    #embed "htmlstart.js"
+    , 0
+};
+
+static const char *szHtmlEnd = "</body></html>";
+
+static char g_relayCmd[MAX_PATH] = "";
+static int g_bRelayDelete = 0;
+
+static const char *szIniRelayCmd = "RelayCmd";
+static int NeedsQuote(const char *pField) { while (*pField) { if (*pField == ',' || *pField == '"') return 1; pField++; } return 0; }
+static void BuildCSVLineFromEntry(char *pEntry, char *pOut) {
+    char *pCur = pOut;
+    for (int fieldIdx = 0; fieldIdx < FIELD_COUNT; fieldIdx++) {
+        if (fieldIdx > 0) *pCur++ = ',';
+        char *pField = GetFieldPtr(pEntry, fieldIdx); int q = NeedsQuote(pField); if (q) *pCur++ = '"';
+        for (const char *s = pField; *s; s++) { if (q && *s == '"') *pCur++ = '"'; if (pCur - pOut < LINE_SIZE - 2) *pCur++ = *s; }
+        if (q) *pCur++ = '"';
+    } *pCur = '\0';
+}
+static void send_file_pdata_tf(SOCKET s, uint8_t pc_id, const char* filepath) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return;
+    
+    uint8_t pdu_buf[32768];
+    int chunk_size = 32768 - 12;
+
+    while (1) {
+        uint8_t data_chunk[32768];
+        size_t bytes_read = fread(data_chunk, 1, chunk_size, f);
+        if (bytes_read == 0) break;
+        
+        uint8_t msg_ctrl = feof(f) ? 0x02 : 0x00;
+        
+        uint32_t pdv_len = 2 + (uint32_t)bytes_read; 
+        uint32_t pdu_len = 4 + pdv_len;
+        
+        pdu_buf[0] = 0x04; pdu_buf[1] = 0x00; 
+        pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF; pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
+        pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF; pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
+        pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl; 
+        
+        memcpy(&pdu_buf[12], data_chunk, bytes_read); 
+        send(s, (char*)pdu_buf, 6 + pdu_len, 0);
+        if (feof(f)) break;
+    }
+    fclose(f);
+}
+
+static void send_pdata_tf(SOCKET s, uint8_t pc_id, uint8_t msg_ctrl, const uint8_t* data, uint32_t data_len) {
+    uint32_t pdv_len = 2 + data_len; uint32_t pdu_len = 4 + pdv_len;
+    static uint8_t pdu_buf[BUFFER_SIZE]; if (6 + pdu_len > sizeof(pdu_buf)) return; 
+    pdu_buf[0] = 0x04; pdu_buf[1] = 0x00; pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF; pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
+    pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF; pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
+    pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl; memcpy(&pdu_buf[12], data, data_len); send(s, (char*)pdu_buf, 6 + pdu_len, 0);
+}
+
+static const char *szIniRelayDel = "RelayDelete";
+
+static int IsWhite(char ival) { return ival == ' ' || ival == '\t' || ival == '\r' || ival == '\n'; }
 /* ===== DICOM Helpers ===== */
 static bool dicom_add_str(uint8_t* buf, int* off, int max, uint16_t g, uint16_t e, const char* s) {
     uint32_t len = s ? (uint32_t)strlen(s) : 0; uint32_t pad = (len % 2) ? 1 : 0; uint32_t tot = len + pad;
@@ -269,377 +417,6 @@ static void dicom_get_string(const uint8_t *buf, int len, uint16_t g, uint16_t e
         }
     }
 }
-
-static int AccessionEquals(const char *pLine, const char *pAccession);
-static int ParseCSVLineToEntry(const char *pLine, char *pEntry);
-static void RemoveClient(int idx);
-static void ProcessHttpClient(int clientIdx, char *pBuf);
-
-static char* patients_csv_data = NULL;
-static long patients_csv_data_len = 0;
-static int pts_name_col_idx = -1;
-static int pts_id_col_idx = 0;
-static int pts_birthdate_col_idx = -1;
-static int pts_sex_col_idx = -1;
-
-typedef struct {
-    char patientName[128], patientID[128], dob[128], sex[128], reqPhys[128], reqSvc[128], procDesc[128], procReason[128];
-    char accNum[128], procID[128], procPri[128], aeTitle[128], spsDate[128], spsTime[128], perfPhys[128];
-    char spsDesc[128], spsID[128], station[128], loc[128], status[128], modality[128], refPhys[128], studyDesc[128];
-    char protoCode[128], protoScheme[128], protoMeaning[128], studyUID[128];
-} MWLEntry;
-
-/* ===== Relay Logic ===== */
-typedef struct {
-    char sopClass[128];
-    char sopInst[128];
-    char filePath[MAX_PATH];
-} RelayTask;
-
-static const char *szIniServer = "Server", *szIniAET = "AETitle", *szIniTelnetPort = "TelnetPort";
-static const char *szIniHttpPort = "HttpPort", *szIniDicomPort = "DicomPort";
-static const char *szIniTelnetTimeout = "TelnetTimeout", *szIniDebugLog = "DebugLog", *szIniDelPwd = "DeletePassword";
-static const char *szIniRelayMode = "RelayMode";
-static const char *szIniRelayIp = "RelayIp";
-static const char *szIniRelayPort = "RelayPort";
-static const char *szIniRelayAet = "RelayAet";
-static const char *szDefAET = "PACS", *szDefTelnetPort = "23", *szDefHttpPort = "80";
-static const char *szDefDicomPort = "1104", *szDefTelnetTimeout = "10", *szDefDebug = "1", *szDefDelPwd = "0";
-static const char *szWndClass = "WorklistTrayClass", *szTrayTip = "RIS Multi-Protocol Server";
-static const char *szMenuStart = "Start Server", *szMenuStop = "Stop Server", *szMenuShow = "Show Console", *szMenuExit = "Exit";
-static const char *szMenuSettings = "Settings";
-static const char *szStartup = "RIS Server starting...\r\n";
-static const char *szConfigFmt = "Config: AET=%s TelnetPort=%u HttpPort=%u DicomPort=%u Timeout=%u DebugLog=%u\r\n";
-static const char *szListenFmt = "Telnet listening on port %u\r\n";
-static const char *szListenHttpFmt = "HTTP listening on port %u\r\n";
-static const char *szListenDicomFmt = "DICOM SCP listening on port %u\r\n";
-static const char *szListenFailFmt = "ERROR: Failed to listen on port %u\r\n";
-static const char *szClientConnFmt = "Telnet Client connected on socket %u\r\n";
-static const char *szHttpConnFmt = "HTTP Client connected on socket %u\r\n";
-static const char *szDicomConnFmt = "DICOM SCU connected.\r\n";
-static const char *szClientDiscFmt = "Client disconnected on socket %u\r\n";
-static const char *szTimeoutFmt = "Client on socket %u timed out\r\n";
-static const char *szPendingFmt = "PENDING Accession %s\r\n";
-static const char *szInsertedFmt = "INSERTED Accession %s\r\n";
-static void send_file_pdata_tf(SOCKET s, uint8_t pc_id, const char* filepath) {
-    FILE *f = fopen(filepath, "rb");
-    if (!f) return;
-    
-    uint8_t pdu_buf[32768];
-    int chunk_size = 32768 - 12;
-
-    while (1) {
-        uint8_t data_chunk[32768];
-        size_t bytes_read = fread(data_chunk, 1, chunk_size, f);
-        if (bytes_read == 0) break;
-        
-        uint8_t msg_ctrl = feof(f) ? 0x02 : 0x00;
-        
-        uint32_t pdv_len = 2 + (uint32_t)bytes_read; 
-        uint32_t pdu_len = 4 + pdv_len;
-        
-        pdu_buf[0] = 0x04; pdu_buf[1] = 0x00; 
-        pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF; pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
-        pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF; pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
-        pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl; 
-        
-        memcpy(&pdu_buf[12], data_chunk, bytes_read); 
-        send(s, (char*)pdu_buf, 6 + pdu_len, 0);
-        if (feof(f)) break;
-    }
-    fclose(f);
-}
-
-static void send_pdata_tf(SOCKET s, uint8_t pc_id, uint8_t msg_ctrl, const uint8_t* data, uint32_t data_len) {
-    uint32_t pdv_len = 2 + data_len; uint32_t pdu_len = 4 + pdv_len;
-    static uint8_t pdu_buf[BUFFER_SIZE]; if (6 + pdu_len > sizeof(pdu_buf)) return; 
-    pdu_buf[0] = 0x04; pdu_buf[1] = 0x00; pdu_buf[2] = (pdu_len >> 24) & 0xFF; pdu_buf[3] = (pdu_len >> 16) & 0xFF; pdu_buf[4] = (pdu_len >> 8) & 0xFF;  pdu_buf[5] = pdu_len & 0xFF;
-    pdu_buf[6] = (pdv_len >> 24) & 0xFF; pdu_buf[7] = (pdv_len >> 16) & 0xFF; pdu_buf[8] = (pdv_len >> 8) & 0xFF;  pdu_buf[9] = pdv_len & 0xFF;
-    pdu_buf[10] = pc_id; pdu_buf[11] = msg_ctrl; memcpy(&pdu_buf[12], data, data_len); send(s, (char*)pdu_buf, 6 + pdu_len, 0);
-}
-
-static const char *szUpdatedFmt = "UPDATED Accession %s\r\n";
-static const char *szConnected = "Connected to RIS Telnet Server. Waiting for data...\r\n";
-static const char *szPendingResp = "PENDING\r\n", *szInsertedResp = "INSERTED\r\n", *szUpdatedResp = "UPDATED\r\n";
-static const char *szInvalidResp = "INVALID LINE\r\n", *szServerStarted = "Server STARTED\r\n", *szServerStopped = "Server STOPPED\r\n";
-static const char *szHttp200OK = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
-static const char *szCSVHeader = "PatientName,PatientID,BirthDate,Sex,ReqPhys,ReqSvc,ProcDesc,Reason,Accession,ProcID,Priority,StationAE,StartDate,StartTime,PerfPhys,SPSDesc,SPSID,StationName,Location,Status,Modality,RefPhys,StudyDesc,ProtoCode,ProtoScheme,ProtoMeaning,StudyUID";
-static const char *szFakePatient = ""; 
-
-static const char *szViewerHtml = 
-"<!DOCTYPE html><html><head><title>Web DICOM Viewer</title>\n"
-"<style>body{margin:0;overflow:hidden;background:#000;color:#fff;font-family:sans-serif;}\n"
-"#tb{background:#333;padding:10px;display:flex;gap:10px;align-items:center;border-bottom:1px solid #555;flex-wrap:wrap;}\n"
-"button, .btn{cursor:pointer;background:#4CAF50;color:#fff;border:none;padding:6px 12px;border-radius:3px;font-weight:bold;text-decoration:none;font-size:13px;}\n"
-"button:hover, .btn:hover{background:#45a049;}\n"
-"#main{display:flex;height:calc(100vh - 50px);} #thumbs{width:150px;background:#1a1a1a;overflow-y:auto;padding:10px;flex-shrink:0;}\n"
-".thumb{cursor:pointer;text-align:center;margin-bottom:10px;padding:5px;border:2px solid transparent;border-radius:4px;background:#2a2a2a;}\n"
-".thumb:hover{background:#333;} .thumb.sel{background:#3a4a6a;border-color:#5a7aFF;}\n"
-".thumb canvas{width:120px;height:120px;background:#000;object-fit:contain;display:block;margin:0 auto;}\n"
-".thumb-txt{font-size:12px;margin-bottom:4px;color:#ddd;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;}\n"
-"#view{flex:1;position:relative;overflow:hidden;background:#050505;} canvas{display:block;}\n"
-"#hud{position:absolute;top:10px;left:10px;pointer-events:none;color:#0f0;font-family:monospace;font-weight:bold;text-shadow:1px 1px 0 #000;}\n"
-"</style></head><body>\n"
-"<div id='tb'>\n"
-"<button onclick='nav(-1)'>&#9664; Prev</button><button onclick='nav(1)'>Next &#9654;</button>\n"
-"<button onclick='resetView()' style='background:#2196F3;'>Reset</button>\n"
-"<button onclick='toggleBox()' id='boxBtn' style='background:#9c27b0;'>ROI Box</button>\n"
-"<a id='dlBtn' class='btn' href='#' target='_blank'>Download</a>\n"
-"<button onclick='document.getElementById(\"upl\").click()'>Upload</button>\n"
-"<input type='file' id='upl' style='display:none;' accept='.dcm' onchange='upl(this, false)'>\n"
-"<button onclick='document.getElementById(\"rep\").click()' style='background:#f44336;'>Replace</button>\n"
-"<input type='file' id='rep' style='display:none;' accept='.dcm' onchange='upl(this, true)'>\n"
-"<span style='margin-left:auto;color:#888;font-size:13px;'>1-5:LUT | B:Box | Arrows:Nav | R-Drag:W/L | L-Drag:Pan | Scroll:Zoom</span>\n"
-"</div>\n"
-"<div id='main'>\n"
-"<div id='thumbs'></div>\n"
-"<div id='view'><canvas id='cvs'></canvas><div id='hud'></div></div>\n"
-"</div>\n"
-"<script>\n"
-"let u = new URLSearchParams(window.location.search); let sop = u.get('sop'); let acc = u.get('acc');\n"
-"let imgList = []; let curIdx = -1; let dicom = null;\n"
-"let cvs = document.getElementById('cvs'); let ctx = cvs.getContext('2d');\n"
-"let panX=0, panY=0, zoom=1, isPan=false, isWl=false, lastX=0, lastY=0;\n"
-"let boxMode = false, roiX=0, roiY=0, roiW=100, roiH=100, isDragBox=false;\n"
-"fetch('/api/images?acc='+acc).then(r=>r.json()).then(lst => {\n"
-"  imgList = lst; let thDiv = document.getElementById('thumbs');\n"
-"  lst.forEach((img, i) => {\n"
-"    let d = document.createElement('div'); d.className='thumb'; d.id='t_'+i; d.onclick=()=>loadIdx(i);\n"
-"    d.innerHTML = '<div class=\"thumb-txt\">'+(img.mod||'OT')+'</div><canvas id=\"tc_'+i+'\" width=120 height=120></canvas>';\n"
-"    thDiv.appendChild(d);\n"
-"    if(img.sop === sop) loadIdx(i);\n"
-"    fetch('/download?sop='+img.sop).then(r=>r.arrayBuffer()).then(b=>{ let t=parseDcm(b); drawToCvs(document.getElementById('tc_'+i), t, true); });\n"
-"  });\n"
-"  if(curIdx===-1 && lst.length>0) loadIdx(0);\n"
-"});\n"
-"function loadIdx(i) { \n"
-"  if(curIdx>=0 && document.getElementById('t_'+curIdx)) document.getElementById('t_'+curIdx).classList.remove('sel');\n"
-"  curIdx = i; let tEl = document.getElementById('t_'+i);\n"
-"  if(tEl) { tEl.classList.add('sel'); tEl.scrollIntoView({behavior:'smooth', block:'nearest'}); }\n"
-"  sop = imgList[i].sop; window.history.replaceState(null,'','/view?sop='+sop+'&acc='+acc);\n"
-"  document.getElementById('dlBtn').href = '/download?sop='+sop;\n"
-"  fetch('/download?sop='+sop).then(r=>r.arrayBuffer()).then(b=>{ dicom=parseDcm(b); dicom.dwc=dicom.wc; dicom.dww=dicom.ww; roiW=Math.max(dicom.w/4,50); roiH=Math.max(dicom.h/4,50); roiX=(dicom.w-roiW)/2; roiY=(dicom.h-roiH)/2; resetView(); });\n"
-"}\n"
-"function nav(d) { let n=curIdx+d; if(n>=0 && n<imgList.length) loadIdx(n); }\n"
-"document.addEventListener('keydown', e => { \n"
-"  if(e.key==='ArrowLeft') nav(-1); if(e.key==='ArrowRight') nav(1); \n"
-"  if(!dicom) return;\n"
-"  if(e.key==='1'){ dicom.wc=dicom.dwc; dicom.ww=dicom.dww; drawToCvs(cvs,dicom,false); }\n"
-"  if(e.key==='2'){ dicom.wc=-600; dicom.ww=1500; drawToCvs(cvs,dicom,false); }\n"
-"  if(e.key==='3'){ dicom.wc=300; dicom.ww=1500; drawToCvs(cvs,dicom,false); }\n"
-"  if(e.key==='4'){ dicom.wc=40; dicom.ww=80; drawToCvs(cvs,dicom,false); }\n"
-"  if(e.key==='5'){ dicom.wc=50; dicom.ww=400; drawToCvs(cvs,dicom,false); }\n"
-"  if(e.key.toLowerCase()==='b') toggleBox();\n"
-"  if(e.key.toLowerCase()==='r') resetView();\n"
-"});\n"
-"function toggleBox() { boxMode = !boxMode; document.getElementById('boxBtn').style.opacity = boxMode?0.6:1; if(boxMode) autoLevel(); else drawToCvs(cvs,dicom,false); }\n"
-"function autoLevel() {\n"
-"  if(!dicom||!boxMode)return; let min=99999, max=-99999;\n"
-"  let dv = new DataView(dicom.px.buffer, dicom.px.byteOffset, dicom.px.byteLength);\n"
-"  for(let y=Math.floor(roiY); y<roiY+roiH; y++) {\n"
-"    if(y<0||y>=dicom.h)continue;\n"
-"    for(let x=Math.floor(roiX); x<roiX+roiW; x++) {\n"
-"      if(x<0||x>=dicom.w)continue;\n"
-"      let val = dicom.b==8 ? dv.getUint8(y*dicom.w+x)*dicom.rs+dicom.ri : dv.getInt16((y*dicom.w+x)*2,true)*dicom.rs+dicom.ri;\n"
-"      if(val<min)min=val; if(val>max)max=val;\n"
-"    }\n"
-"  }\n"
-"  if(min<=max) { dicom.ww = Math.max(1, max-min); dicom.wc = min+dicom.ww/2; }\n"
-"  drawToCvs(cvs,dicom,false);\n"
-"}\n"
-"function parseDcm(buf) {\n"
-"  let dv = new DataView(buf); let off = 132; let t = { w:0, h:0, b:16, wc:128, ww:256, rs:1, ri:0, px:null, dwc:128, dww:256 };\n"
-"  while(off+8 <= buf.byteLength) {\n"
-"    let g=dv.getUint16(off,true), e=dv.getUint16(off+2,true); off+=4;\n"
-"    let len=0, isExp=false; \n"
-"    let c1=String.fromCharCode(dv.getUint8(off)), c2=String.fromCharCode(dv.getUint8(off+1));\n"
-"    if(/[A-Z]/.test(c1) && /[A-Z]/.test(c2)) {\n"
-"      isExp=true; off+=2;\n"
-"      if((c1=='O'&&(c2=='B'||c2=='W'||c2=='F')) || (c1=='S'&&c2=='Q') || (c1=='U'&&(c2=='N'||c2=='T'))) { off+=2; len=dv.getUint32(off,true); off+=4; }\n"
-"      else { len=dv.getUint16(off,true); off+=2; }\n"
-"    } else { len=dv.getUint32(off,true); off+=4; }\n"
-"    if(len===0xFFFFFFFF) len=0;\n"
-"    if(g==0x7FE0&&e==0x0010) { \n"
-"        let pxLen = (len===0||len===0xFFFFFFFF) ? buf.byteLength-off : Math.min(len, buf.byteLength-off);\n"
-"        t.px=new Uint8Array(buf,off,pxLen); break; \n"
-"    }\n"
-"    let v=\"\"; if(len>0&&len<255){ for(let k=0;k<len;k++) v+=String.fromCharCode(dv.getUint8(off+k)); v=v.trim(); }\n"
-"    if(g==0x0028&&e==0x0010) t.h=dv.getUint16(off,true);\n"
-"    else if(g==0x0028&&e==0x0011) t.w=dv.getUint16(off,true);\n"
-"    else if(g==0x0028&&e==0x0100) t.b=dv.getUint16(off,true);\n"
-"    else if(g==0x0028&&e==0x1050 && v) t.wc=parseFloat(v.split('\\\\')[0]);\n"
-"    else if(g==0x0028&&e==0x1051 && v) t.ww=parseFloat(v.split('\\\\')[0]);\n"
-"    else if(g==0x0028&&e==0x1052 && v) t.ri=parseFloat(v);\n"
-"    else if(g==0x0028&&e==0x1053 && v) t.rs=parseFloat(v);\n"
-"    off+=len;\n"
-"  }\n"
-"  return t;\n"
-"}\n"
-"let lastImgData = null, lastWc=null, lastWw=null;\n"
-"function drawToCvs(c, t, isThumb) {\n"
-"  if(!t||!t.px||!t.w||!t.h) return;\n"
-"  let cx=c.getContext('2d'); \n"
-"  let imgData;\n"
-"  if (!isThumb && lastImgData && lastImgData.width===t.w && lastImgData.height===t.h && lastWc===t.wc && lastWw===t.ww) {\n"
-"      imgData = lastImgData;\n"
-"  } else {\n"
-"      imgData = cx.createImageData(t.w, t.h);\n"
-"      let minV = t.wc - 0.5 - (t.ww-1)/2, maxV = t.wc - 0.5 + (t.ww-1)/2;\n"
-"      let dv = new DataView(t.px.buffer, t.px.byteOffset, t.px.byteLength);\n"
-"      for(let i=0; i<t.w*t.h; i++) {\n"
-"        let val = t.b==8 ? dv.getUint8(i)*t.rs+t.ri : dv.getInt16(i*2,true)*t.rs+t.ri;\n"
-"        let p = val<=minV?0 : val>maxV?255 : ((val-(t.wc-0.5))/(t.ww-1))*255;\n"
-"        let idx = i*4; imgData.data[idx]=p; imgData.data[idx+1]=p; imgData.data[idx+2]=p; imgData.data[idx+3]=255;\n"
-"      }\n"
-"      if(!isThumb) { lastImgData=imgData; lastWc=t.wc; lastWw=t.ww; }\n"
-"  }\n"
-"  if(isThumb) {\n"
-"    let temp=document.createElement('canvas'); temp.width=t.w; temp.height=t.h;\n"
-"    temp.getContext('2d').putImageData(imgData,0,0);\n"
-"    cx.drawImage(temp, 0, 0, t.w, t.h, 0, 0, c.width, c.height);\n"
-"  } else { \n"
-"    c.width=t.w; c.height=t.h; cx.putImageData(imgData,0,0); \n"
-"    if(boxMode) { cx.strokeStyle='yellow'; cx.lineWidth=2/zoom; cx.strokeRect(roiX, roiY, roiW, roiH); }\n"
-"    render(); \n"
-"  }\n"
-"}\n"
-"function resetView() { if(!dicom)return; let v=document.getElementById('view'); zoom=Math.min(v.clientWidth/dicom.w, v.clientHeight/dicom.h)*0.95; panX=(v.clientWidth-dicom.w*zoom)/2; panY=(v.clientHeight-dicom.h*zoom)/2; drawToCvs(cvs,dicom,false); }\n"
-"function render() {\n"
-"  cvs.style.transformOrigin='0 0'; cvs.style.transform='translate('+panX+'px,'+panY+'px) scale('+zoom+')';\n"
-"  document.getElementById('hud').innerText = 'WW: '+Math.round(dicom.ww)+' | WC: '+Math.round(dicom.wc);\n"
-"}\n"
-"let v=document.getElementById('view');\n"
-"v.onmousedown=e=>{ \n"
-"  let r=cvs.getBoundingClientRect(); let mx=(e.clientX-r.left)/zoom; let my=(e.clientY-r.top)/zoom;\n"
-"  if(e.button==0) {\n"
-"    if(boxMode && mx>=roiX && mx<=roiX+roiW && my>=roiY && my<=roiY+roiH) isDragBox=true;\n"
-"    else isPan=true;\n"
-"  }\n"
-"  if(e.button==2)isWl=true; \n"
-"  lastX=e.clientX; lastY=e.clientY; \n"
-"};\n"
-"window.onmouseup=()=>{ isPan=false; isWl=false; isDragBox=false; };\n"
-"window.onmousemove=e=>{\n"
-"  if(isDragBox) { roiX+=(e.clientX-lastX)/zoom; roiY+=(e.clientY-lastY)/zoom; lastX=e.clientX; lastY=e.clientY; autoLevel(); }\n"
-"  else if(isPan) { panX+=(e.clientX-lastX); panY+=(e.clientY-lastY); lastX=e.clientX; lastY=e.clientY; render(); }\n"
-"  else if(isWl) { dicom.ww+=(e.clientX-lastX)*2; dicom.wc+=(e.clientY-lastY)*2; if(dicom.ww<1)dicom.ww=1; lastX=e.clientX; lastY=e.clientY; drawToCvs(cvs,dicom,false); }\n"
-"};\n"
-"v.onwheel=e=> { let zf = e.deltaY<0?1.1:0.9; let w=dicom.w*zoom, h=dicom.h*zoom; panX-=(w*zf-w)/2; panY-=(h*zf-h)/2; zoom*=zf; render(); };\n"
-"v.oncontextmenu=e=>e.preventDefault();\n"
-"window.onresize=resetView;\n"
-"function upl(fi, isRep){ \n"
-"  if(!fi.files.length) return; \n"
-"  let fd = new FormData(); fd.append('file', fi.files[0]); \n"
-"  if(confirm('Write Worklist data into this file header?')){ \n"
-"    fd.append('rewrite', '1'); fd.append('acc', acc); \n"
-"  } \n"
-"  let url = isRep ? '/replace?sop='+sop : '/upload_new?acc='+acc;\n"
-"  fetch(url, {method:'POST', body:fd}).then(()=>{window.location.reload();}); \n"
-"}\n"
-"</script></body></html>";
-
-static const char *szHtmlFormsTop = "<div class='form-row' style='display:flex; align-items:center; gap:10px; margin-top:20px; margin-bottom:15px;'>"
-"<button type='button' onclick='newPatient()' class='top-btn bg-green'>New Patient</button>"
-"<button type='button' onclick='filterPatients()' class='top-btn bg-blue'>Search</button>"
-"<form action='/delete' method='POST' id='delAllForm' style='margin:0;'>"
-"<input type='hidden' name='pwd' id='delPwd' value=''>"
-"<input type='button' value='Delete All Data' class='top-btn bg-red' onclick='delAll()'>"
-"</form></div><hr><form id='manForm'><input type='hidden' id='oldAcc' name='oldAcc' value=''>";
-
-static const char *szHtmlFormsInputs = "<input type='text' name='PatientName' placeholder='Patient Name'> <input type='text' name='PatientID' placeholder='Patient ID'> Birth: <input type='date' name='BirthDate'> <select name='Sex'><option value=''>Sex</option><option value='M'>M</option><option value='F'>F</option><option value='O'>O</option></select><br>"
-"<input type='text' name='ReqPhys' placeholder='Req Phys'> <input type='text' name='ReqSvc' placeholder='Req Svc'> <input type='text' name='ProcDesc' placeholder='Proc Desc'> <input type='text' name='Reason' placeholder='Reason'><br>"
-"<input type='text' name='Accession' placeholder='Accession'> <input type='text' name='ProcID' placeholder='Proc ID'> <select name='Priority'><option value='LOW' selected>LOW</option><option value='MEDIUM'>MEDIUM</option><option value='ROUTINE'>ROUTINE</option><option value='HIGH'>HIGH</option></select> <input type='text' name='StationAE' placeholder='Station AE'><br>"
-"Start: <input type='date' name='StartDate'> Time: <input type='time' name='StartTime'> <input type='text' name='PerfPhys' placeholder='Perf Phys'> <input type='text' name='SPSDesc' placeholder='SPS Desc'><br>"
-"<input type='text' name='SPSID' placeholder='SPS ID'> ";
-
-static const char *szHtmlForms2 = " <select name='Status'><option value='0'>NONE</option><option value='1' selected>SCHEDULED</option><option value='2'>ARRIVED</option><option value='3'>READY</option><option value='4'>STARTED</option><option value='5'>DEPARTED</option></select><br>"
-"<input type='text' name='Modality' placeholder='Modality'> <input type='text' name='RefPhys' placeholder='Ref Phys'> <input type='text' name='StudyDesc' placeholder='Study Desc'><br>"
-"<input type='text' name='ProtoCode' placeholder='Proto Code'> <input type='text' name='ProtoScheme' placeholder='Proto Scheme'> <input type='text' name='ProtoMeaning' placeholder='Proto Meaning'><br>"
-"<input type='text' name='StudyUID' placeholder='Study UID' style='width:300px;'><br>"
-"<div style='margin-top:15px; display:flex; gap:10px;'>"
-"<button type='button' onclick='sendMan()' class='top-btn bg-green'>Add/Edit Patient</button> "
-"<button type='button' onclick='nxtA()' class='top-btn bg-blue'>Next Accession</button> "
-"<button type='button' onclick='multiStudy()' class='top-btn bg-blue'>Stub</button> "
-"<button type='button' onclick='delP()' class='top-btn bg-red'>Delete Patient</button></div></form><hr>"
-"<br><div style='text-align:right;'><a href='/settings' style='color:#2196F3; font-weight:bold; font-size:16px; margin-right:20px; text-decoration:none;'>Settings</a></div>";
-
-static const char *szHtmlStart = "<html><head><title>RIS Worklist Manager</title><style>"
-"table{border-collapse:collapse;width:100%;font-size:14px;}th,td{border:1px solid #dddddd;padding:12px;}th{background:#009879;color:#fff;text-align:left;}"
-"tr{border-bottom:1px solid #ddd;}tr:nth-child(even){background:#f3f3f3;}input,select{margin:5px;padding:5px;}div.query-box{margin:20px;padding:10px;background:#f9f9f9;border-radius:5px;}div.form-row{display:inline-block;margin-right:15px;}"
-".top-btn { min-width: 140px; height: 36px; padding: 0 15px; box-sizing: border-box; text-align: center; border: none; cursor: pointer; color: white; display: inline-block; font-size: 14px; margin: 0; line-height: 36px; border-radius: 4px; text-decoration: none; }"
-".bg-green { background: #4CAF50; } .bg-blue { background: #2196F3; } .bg-red { background: #f44336; }"
-"</style>"
-"<script>var fnames=['PatientName','PatientID','BirthDate','Sex','ReqPhys','ReqSvc','ProcDesc','Reason','Accession','ProcID','Priority','StationAE','StartDate','StartTime','PerfPhys','SPSDesc','SPSID','StationName','Location','Status','Modality','RefPhys','StudyDesc','ProtoCode','ProtoScheme','ProtoMeaning','StudyUID'];"
-"function f(r){var c=r.cells;for(var i=0;i<c.length&&i<fnames.length;i++){var e=document.getElementsByName(fnames[i])[0];if(e)e.value=(c[i].innerText||c[i].textContent).trim();}"
-"var oa=document.getElementById('oldAcc');if(oa)oa.value=c[8].innerText.trim();"
-"var sel=document.getElementById('procCodeSel');if(sel){var pid=document.getElementsByName('ProcID')[0].value;for(var j=0;j<sel.options.length;j++){sel.options[j].selected=(sel.options[j].getAttribute('data-id')===pid);}}}"
-"window.maxAcc=window.maxAcc||0;"
-"function nxtA(){var t=document.getElementById('pTable'),m=0,p='ACC',c=5;if(t){for(var i=1;i<t.rows.length;i++){var v=t.rows[i].cells[8].innerText||'',mt=v.match(/([^0-9]*)([0-9]+)/);if(mt){p=mt[1];var val=parseInt(mt[2],10);if(val>m){m=val;c=mt[2].length;}}}}if(window.maxAcc<=m)window.maxAcc=m;window.maxAcc++;document.getElementsByName('Accession')[0].value=p+String(window.maxAcc).padStart(c,'0');}"
-"function sendMan(){var a=document.getElementsByName('Accession')[0].value.trim();if(!a){alert('Accession number is required!');return false;}"
-"var oa=document.getElementById('oldAcc');var oldA=oa?encodeURIComponent(oa.value):'';"
-"var sel=document.getElementById('procCodeSel');var opts=[];if(sel){for(var j=0;j<sel.options.length;j++){if(sel.options[j].selected&&sel.options[j].value!=='')opts.push(sel.options[j]);}}"
-"if(opts.length>1){var p=[];for(var k=0;k<opts.length;k++){nxtA();"
-"document.getElementsByName('Modality')[0].value=opts[k].getAttribute('data-mod')||'';"
-"document.getElementsByName('ProcDesc')[0].value=opts[k].text||'';"
-"document.getElementsByName('ProcID')[0].value=opts[k].getAttribute('data-id')||'';"
-"document.getElementsByName('SPSID')[0].value=opts[k].getAttribute('data-code')||'';"
-"document.getElementsByName('StationAE')[0].value='';"
-"document.getElementsByName('SPSDesc')[0].value='';"
-"var sn=document.getElementsByName('StationName')[0];if(sn)sn.value='';"
-"document.getElementsByName('Location')[0].value='';"
-"document.getElementsByName('StudyDesc')[0].value='';"
-"var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}"
-"p.push(fetch('/manual?oldAcc='+oldA,{method:'POST',body:c.join(',')}));}Promise.all(p).then(function(){window.location.href='/';});return false;}"
-"var c=[];for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];var v=el?el.value:'';if(v.indexOf(',')>-1||v.indexOf('\"')>-1)v='\"'+v.replace(new RegExp('\"','g'),'\"\"')+'\"';c.push(v);}fetch('/manual?oldAcc='+oldA,{method:'POST',body:c.join(',')}).then(function(){window.location.href='/';});return false;}"
-"function delP(){var a=document.getElementsByName('Accession')[0].value;if(a&&confirm('Delete Patient '+a+'?'))fetch('/delpat',{method:'POST',body:a}).then(function(){window.location.href='/';});}"
-"function delAll(){var p=prompt('Enter password to delete all data:');if(p!==null){document.getElementById('delPwd').value=p;document.getElementById('delAllForm').submit();}}"
-"function multiStudy(){alert('Stub not implemented');}"
-"function sortTable(n){var t,r,sw,i,x,y,sd,d;t=document.getElementById('pTable');sw=true;d='asc';while(sw){sw=false;r=t.rows;for(i=1;i<(r.length-1);i++){sd=false;x=r[i].getElementsByTagName('TD')[n];y=r[i+1].getElementsByTagName('TD')[n];if(d=='asc'){if(x.innerHTML.toLowerCase()>y.innerHTML.toLowerCase()){sd=true;break;}}else{if(x.innerHTML.toLowerCase()<y.innerHTML.toLowerCase()){sd=true;break;}}}if(sd){r[i].parentNode.insertBefore(r[i+1],r[i]);sw=true;}}}"
-"function formatDates(){var t=document.getElementById('pTable');if(!t)return;for(var i=1;i<t.rows.length;i++){var c=t.rows[i].cells;if(c.length>13){"
-"var b=c[2].innerText;if(b.length===8)c[2].innerText=b.substr(0,4)+'-'+b.substr(4,2)+'-'+b.substr(6,2);"
-"var s=c[12].innerText;if(s.length===8)c[12].innerText=s.substr(0,4)+'-'+s.substr(4,2)+'-'+s.substr(6,2);"
-"var tm=c[13].innerText;if(tm.length===6)c[13].innerText=tm.substr(0,2)+':'+tm.substr(2,2);"
-"}}}"
-"function newPatient(){var oa=document.getElementById('oldAcc');if(oa)oa.value='';for(var i=0;i<fnames.length;i++){var el=document.getElementsByName(fnames[i])[0];if(el)el.value='';}var d=new Date(),y=d.getFullYear(),mo=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2);var sd=document.getElementsByName('StartDate')[0];if(sd)sd.value=y+'-'+mo+'-'+da;nxtA();var su=document.getElementsByName('StudyUID')[0];if(su){var sec=Math.floor(Date.now()/1000);var rnd=Math.floor(Math.random()*10000);su.value='1.2.840.113619.2.1.'+sec+'.'+rnd;}var stat=document.getElementsByName('Status')[0];if(stat)stat.value='1';var pri=document.getElementsByName('Priority')[0];if(pri)pri.value='LOW';var tm=document.getElementsByName('StartTime')[0];if(tm)tm.value='16:00';}"
-"function loadProcCode(){var sel=document.getElementById('procCodeSel');if(sel&&sel.selectedIndex>=0){var idx=sel.selectedIndex;"
-"var id=document.getElementsByName('ProcID')[0];var code=document.getElementsByName('SPSID')[0];var mod=document.getElementsByName('Modality')[0];var desc=document.getElementsByName('ProcDesc')[0];"
-"if(id&&code&&mod&&desc){id.value=sel.options[idx].getAttribute('data-id')||'';code.value=sel.options[idx].getAttribute('data-code')||'';mod.value=sel.options[idx].getAttribute('data-mod')||'';desc.value=sel.options[idx].text;}}"
-"}"
-"function filterProcCodes(){var i,f=document.getElementById('procFilter').value.toUpperCase(),s=document.getElementById('procCodeSel'),o=s.options;for(i=1;i<o.length;i++){if((o[i].text||o[i].innerText).toUpperCase().indexOf(f)>-1){o[i].style.display='';}else{o[i].style.display='none';o[i].selected=false;}}}"
-"let ptDebounce=null;let ptAbort=null;"
-"function filterPatients(){"
-"    var f=document.getElementById('patientFilter').value.trim();"
-"    if(ptDebounce)clearTimeout(ptDebounce);"
-"    ptDebounce=setTimeout(async function(){"
-"        if(ptAbort)ptAbort.abort();"
-"        ptAbort=new AbortController();"
-"        try{"
-"            var res=await fetch('/api/patients?filter='+encodeURIComponent(f),{signal:ptAbort.signal});"
-"            if(!res.ok)return;"
-"            var names=await res.json();"
-"            var sel=document.getElementById('patientSel');"
-"            sel.options.length=0;"
-"            names.forEach(function(n){"
-"                var opt=document.createElement('option');"
-"                opt.value=n;opt.text=n;"
-"                sel.appendChild(opt);"
-"            });"
-"        }catch(e){}"
-"    },250);"
-"}"
-"async function loadPatientDetails(name){if(!name)return;try{var res=await fetch('/api/patient/'+encodeURIComponent(name));if(!res.ok)return;var data=await res.json();if(!data.error){document.getElementsByName('PatientName')[0].value=data.name||'';document.getElementsByName('PatientID')[0].value=data.patient_id||'';"
-"var bd=data.birthdate||'';if(/^\\d{8}$/.test(bd)){bd=bd.substr(0,4)+'-'+bd.substr(4,2)+'-'+bd.substr(6,2);}else if(bd.indexOf('/')>-1){var p=bd.split('/');if(p.length===3){if(p[2].length===4)bd=p[2]+'-'+p[0].padStart(2,'0')+'-'+p[1].padStart(2,'0');else if(p[0].length===4)bd=p[0]+'-'+p[1].padStart(2,'0')+'-'+p[2].padStart(2,'0');}}"
-"document.getElementsByName('BirthDate')[0].value=bd;document.getElementsByName('Sex')[0].value=data.sex||'';}}catch(e){}}"
-"function filterStatus(s){var t=document.getElementById('pTable');if(!t)return;for(var i=1;i<t.rows.length;i++){var st=t.rows[i].cells[19].innerText||t.rows[i].cells[19].textContent;if(s===''||st.trim()===s)t.rows[i].style.display='';else t.rows[i].style.display='none';}}"
-"window.onload=function(){newPatient();filterPatients();filterStatus('1');};</script></head><body style='font-family:Arial,sans-serif;padding:20px;'>";
-
-static const char *szHtmlEnd = "</body></html>";
-
-static char g_relayCmd[MAX_PATH] = "";
-static int g_bRelayDelete = 0;
-
-static const char *szIniRelayCmd = "RelayCmd";
-static const char *szIniRelayDel = "RelayDelete";
 
 /* ===== Logging ===== */
 static void write_log(const char *msg) {
@@ -933,6 +710,13 @@ static DWORD WINAPI PeriodicBackupThread(LPVOID lpParam) {
     }
     return 0;
 }
+static void TrimInPlace(char *pStr) {
+    char *p = pStr;
+    while (*p && IsWhite(*p)) p++;
+    if (p != pStr) memmove(pStr, p, strlen(p)+1);
+    size_t len = strlen(pStr);
+    while (len > 0 && IsWhite(pStr[len-1])) pStr[--len] = '\0';
+}
 static void unescape_string(char *str) {
     char *read = str, *write = str;
     while (*read) {
@@ -1208,6 +992,78 @@ static bool apply_dicom_edits_file(const char *input_file, const char *output_fi
     return true;
 }
 
+static void UpdateWorklistFromDicomTags(const char *acc, const uint8_t *dbuf, int dlen) {
+    if (!acc || !acc[0]) return;
+    char upName[128] = {0}, upId[128] = {0}, upMod[128] = {0}, upStudyDesc[128] = {0};
+    char upDob[128] = {0}, upSex[128] = {0}, upReqPhys[128] = {0}, upReqProcDesc[128] = {0};
+    char upReason[128] = {0}, upProcId[128] = {0}, upStationAe[128] = {0}, upStudyDate[128] = {0};
+    char upStudyTime[128] = {0}, upPerfPhys[128] = {0}, upSpsDesc[128] = {0}, upSpsId[128] = {0};
+    char upStationName[128] = {0}, upRefPhys[128] = {0}, upStudyUID[128] = {0};
+
+    dicom_get_string(dbuf, dlen, 0x0010, 0x0010, upName);
+    dicom_get_string(dbuf, dlen, 0x0010, 0x0020, upId);
+    dicom_get_string(dbuf, dlen, 0x0008, 0x0060, upMod);
+    dicom_get_string(dbuf, dlen, 0x0008, 0x1030, upStudyDesc);
+    dicom_get_string(dbuf, dlen, 0x0010, 0x0030, upDob);
+    dicom_get_string(dbuf, dlen, 0x0010, 0x0040, upSex);
+    dicom_get_string(dbuf, dlen, 0x0032, 0x1032, upReqPhys);
+    dicom_get_string(dbuf, dlen, 0x0032, 0x1060, upReqProcDesc);
+    dicom_get_string(dbuf, dlen, 0x0040, 0x1002, upReason);
+    dicom_get_string(dbuf, dlen, 0x0040, 0x1001, upProcId);
+    dicom_get_string(dbuf, dlen, 0x0040, 0x0001, upStationAe);
+    dicom_get_string(dbuf, dlen, 0x0008, 0x0020, upStudyDate);
+    dicom_get_string(dbuf, dlen, 0x0008, 0x0030, upStudyTime);
+    dicom_get_string(dbuf, dlen, 0x0008, 0x1050, upPerfPhys);
+    dicom_get_string(dbuf, dlen, 0x0040, 0x0007, upSpsDesc);
+    dicom_get_string(dbuf, dlen, 0x0040, 0x0009, upSpsId);
+    dicom_get_string(dbuf, dlen, 0x0008, 0x1010, upStationName);
+    dicom_get_string(dbuf, dlen, 0x0008, 0x0090, upRefPhys);
+    dicom_get_string(dbuf, dlen, 0x0020, 0x000D, upStudyUID);
+
+    TrimInPlace(upName); TrimInPlace(upId); TrimInPlace(upMod); TrimInPlace(upStudyDesc);
+    TrimInPlace(upDob); TrimInPlace(upSex); TrimInPlace(upReqPhys); TrimInPlace(upReqProcDesc);
+    TrimInPlace(upReason); TrimInPlace(upProcId); TrimInPlace(upStationAe); TrimInPlace(upStudyDate);
+    TrimInPlace(upStudyTime); TrimInPlace(upPerfPhys); TrimInPlace(upSpsDesc); TrimInPlace(upSpsId);
+    TrimInPlace(upStationName); TrimInPlace(upRefPhys); TrimInPlace(upStudyUID);
+
+    EnterCriticalSection(&g_csvLock);
+    for (int r = 1; r < g_csvRows; r++) {
+        if (AccessionEquals(g_csvData[r], acc)) {
+            char entry[ENTRY_SIZE];
+            ParseCSVLineToEntry(g_csvData[r], entry);
+            int changed = 0;
+            
+            if (upName[0] && !GetFieldPtr(entry, 0)[0]) { strncpy(GetFieldPtr(entry, 0), upName, FIELD_SIZE - 1); changed = 1; }
+            if (upId[0] && !GetFieldPtr(entry, 1)[0]) { strncpy(GetFieldPtr(entry, 1), upId, FIELD_SIZE - 1); changed = 1; }
+            if (upDob[0] && !GetFieldPtr(entry, 2)[0]) { strncpy(GetFieldPtr(entry, 2), upDob, FIELD_SIZE - 1); changed = 1; }
+            if (upSex[0] && !GetFieldPtr(entry, 3)[0]) { strncpy(GetFieldPtr(entry, 3), upSex, FIELD_SIZE - 1); changed = 1; }
+            if (upReqPhys[0] && !GetFieldPtr(entry, 4)[0]) { strncpy(GetFieldPtr(entry, 4), upReqPhys, FIELD_SIZE - 1); changed = 1; }
+            if (upReqProcDesc[0] && !GetFieldPtr(entry, 6)[0]) { strncpy(GetFieldPtr(entry, 6), upReqProcDesc, FIELD_SIZE - 1); changed = 1; }
+            if (upReason[0] && !GetFieldPtr(entry, 7)[0]) { strncpy(GetFieldPtr(entry, 7), upReason, FIELD_SIZE - 1); changed = 1; }
+            if (upProcId[0] && !GetFieldPtr(entry, 9)[0]) { strncpy(GetFieldPtr(entry, 9), upProcId, FIELD_SIZE - 1); changed = 1; }
+            if (upStationAe[0] && !GetFieldPtr(entry, 11)[0]) { strncpy(GetFieldPtr(entry, 11), upStationAe, FIELD_SIZE - 1); changed = 1; }
+            if (upStudyDate[0] && !GetFieldPtr(entry, 12)[0]) { strncpy(GetFieldPtr(entry, 12), upStudyDate, FIELD_SIZE - 1); changed = 1; }
+            if (upStudyTime[0] && !GetFieldPtr(entry, 13)[0]) { strncpy(GetFieldPtr(entry, 13), upStudyTime, FIELD_SIZE - 1); changed = 1; }
+            if (upPerfPhys[0] && !GetFieldPtr(entry, 14)[0]) { strncpy(GetFieldPtr(entry, 14), upPerfPhys, FIELD_SIZE - 1); changed = 1; }
+            if (upSpsDesc[0] && !GetFieldPtr(entry, 15)[0]) { strncpy(GetFieldPtr(entry, 15), upSpsDesc, FIELD_SIZE - 1); changed = 1; }
+            if (upSpsId[0] && !GetFieldPtr(entry, 16)[0]) { strncpy(GetFieldPtr(entry, 16), upSpsId, FIELD_SIZE - 1); changed = 1; }
+            if (upStationName[0] && !GetFieldPtr(entry, 17)[0]) { strncpy(GetFieldPtr(entry, 17), upStationName, FIELD_SIZE - 1); changed = 1; }
+            if (upMod[0] && !GetFieldPtr(entry, 20)[0]) { strncpy(GetFieldPtr(entry, 20), upMod, FIELD_SIZE - 1); changed = 1; }
+            if (upRefPhys[0] && !GetFieldPtr(entry, 21)[0]) { strncpy(GetFieldPtr(entry, 21), upRefPhys, FIELD_SIZE - 1); changed = 1; }
+            if (upStudyDesc[0] && !GetFieldPtr(entry, 22)[0]) { strncpy(GetFieldPtr(entry, 22), upStudyDesc, FIELD_SIZE - 1); changed = 1; }
+            if (upStudyUID[0] && !GetFieldPtr(entry, 26)[0]) { strncpy(GetFieldPtr(entry, 26), upStudyUID, FIELD_SIZE - 1); changed = 1; }
+
+            if (changed) {
+                char lineOut[LINE_SIZE];
+                BuildCSVLineFromEntry(entry, lineOut);
+                strncpy(g_csvData[r], lineOut, LINE_SIZE - 1);
+            }
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_csvLock);
+}
+
 /* ===== Update Existing Accession Images ===== */
 static void UpdateAccessionImages(const char *oldAcc, char *newEntry) {
     if (!oldAcc || !oldAcc[0]) return;
@@ -1299,14 +1155,6 @@ static int get_csv_field(const char* line, int target_col, char* out_buf, int ma
 static char *GetFieldPtr(char *pEntry, int fieldIdx) { return pEntry + (fieldIdx * FIELD_SIZE); }
 static char *GetPendingEntryPtr(int idx) { return g_pendingEntries + (idx * ENTRY_SIZE); }
 
-static int IsWhite(char ival) { return ival == ' ' || ival == '\t' || ival == '\r' || ival == '\n'; }
-static void TrimInPlace(char *pStr) {
-    char *p = pStr;
-    while (*p && IsWhite(*p)) p++;
-    if (p != pStr) memmove(pStr, p, strlen(p)+1);
-    size_t len = strlen(pStr);
-    while (len > 0 && IsWhite(pStr[len-1])) pStr[--len] = '\0';
-}
 static void StripDashes(char *pStr) {
     char *dst = pStr;
     while (*pStr) { if (*pStr != '-') *dst++ = *pStr; pStr++; }
@@ -1433,16 +1281,6 @@ static int ParseCSVLineToEntry(const char *pLine, char *pEntry) {
     return 1;
 }
 static int ValidateEntry(char *pEntry) { return (*GetFieldPtr(pEntry, 8) != '\0'); }
-static int NeedsQuote(const char *pField) { while (*pField) { if (*pField == ',' || *pField == '"') return 1; pField++; } return 0; }
-static void BuildCSVLineFromEntry(char *pEntry, char *pOut) {
-    char *pCur = pOut;
-    for (int fieldIdx = 0; fieldIdx < FIELD_COUNT; fieldIdx++) {
-        if (fieldIdx > 0) *pCur++ = ',';
-        char *pField = GetFieldPtr(pEntry, fieldIdx); int q = NeedsQuote(pField); if (q) *pCur++ = '"';
-        for (const char *s = pField; *s; s++) { if (q && *s == '"') *pCur++ = '"'; if (pCur - pOut < LINE_SIZE - 2) *pCur++ = *s; }
-        if (q) *pCur++ = '"';
-    } *pCur = '\0';
-}
 static void EnsureCsvInitialized(void) {
     if (g_csvInitialized) return; g_csvInitialized = 1;
     strncpy(g_csvData[0], szCSVHeader, LINE_SIZE - 1); g_csvData[0][LINE_SIZE - 1] = '\0';
@@ -1740,6 +1578,12 @@ static void handle_c_store_rq(SOCKET clientSocket, uint8_t pc_id, uint16_t msg_i
     dicom_get_string(data_buf, data_len, 0x0008, 0x1010, stationName);
     dicom_get_string(data_buf, data_len, 0x0008, 0x0090, refPhys);
     dicom_get_string(data_buf, data_len, 0x0020, 0x000D, studyUID);
+
+    TrimInPlace(acc); TrimInPlace(pName); TrimInPlace(pId); TrimInPlace(mod); TrimInPlace(studyDesc);
+    TrimInPlace(pDob); TrimInPlace(pSex); TrimInPlace(reqPhys); TrimInPlace(reqProcDesc);
+    TrimInPlace(reason); TrimInPlace(procId); TrimInPlace(stationAe); TrimInPlace(studyDate);
+    TrimInPlace(studyTime); TrimInPlace(perfPhys); TrimInPlace(spsDesc); TrimInPlace(spsId);
+    TrimInPlace(stationName); TrimInPlace(refPhys); TrimInPlace(studyUID);
 
     if (acc[0] == '\0') {
         int maxVal = 0;
@@ -2158,7 +2002,7 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
     }
     else if (strncmp(pBuf, "GET /view?", 10) == 0) {
         SendText(sock, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n");
-        SendText(sock, szViewerHtml);
+        SendText(sock, (const char *)szViewerHtml);
         CloseHttpClient(clientIdx);
         return;
     }
@@ -2335,7 +2179,17 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                 char chunk[8192];
                 size_t bytes;
                 while ((bytes = fread(chunk, 1, sizeof(chunk), imgFp)) > 0) {
-                    send(sock, chunk, (int)bytes, 0);
+                    int chunk_sent = 0;
+                    while (chunk_sent < (int)bytes) {
+                        int sent = send(sock, chunk + chunk_sent, (int)bytes - chunk_sent, 0);
+                        if (sent < 0) {
+                            if (WSAGetLastError() == WSAEWOULDBLOCK) { Sleep(1); continue; }
+                            break;
+                        }
+                        if (sent == 0) break;
+                        chunk_sent += sent;
+                    }
+                    if (chunk_sent < (int)bytes) break;
                 }
                 fclose(imgFp);
                 CloseHttpClient(clientIdx);
@@ -2372,8 +2226,21 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             char hdr[512];
             snprintf(hdr, sizeof(hdr), "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename=\"%s\"\r\nContent-Length: %ld\r\nConnection: close\r\n\r\n", fileReq, fsize);
             SendText(sock, hdr);
+            
             char chunk[8192]; size_t bytes;
-            while ((bytes = fread(chunk, 1, sizeof(chunk), dlFp)) > 0) send(sock, chunk, (int)bytes, 0);
+            while ((bytes = fread(chunk, 1, sizeof(chunk), dlFp)) > 0) {
+                int chunk_sent = 0;
+                while (chunk_sent < (int)bytes) {
+                    int sent = send(sock, chunk + chunk_sent, (int)bytes - chunk_sent, 0);
+                    if (sent < 0) {
+                        if (WSAGetLastError() == WSAEWOULDBLOCK) { Sleep(1); continue; }
+                        break;
+                    }
+                    if (sent == 0) break;
+                    chunk_sent += sent;
+                }
+                if (chunk_sent < (int)bytes) break;
+            }
             fclose(dlFp);
             CloseHttpClient(clientIdx); return;
         }
@@ -2450,6 +2317,71 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                            "<button onclick=\"filterStatus('5')\" class='top-btn' style='background:#f44336;'>DEPARTED</button>"
                            "</div>");
 
+            SendText(sock, "<div style='margin-bottom:10px; background:#eee; padding:10px; display:flex; gap:10px; align-items:center; border-radius:4px; flex-wrap:wrap;'>"
+                           "<button onclick='clearWlFlt()' class='top-btn bg-blue' style='min-width:80px;height:28px;line-height:28px;padding:0;'>Clear</button>"
+                           "<input type='text' id='flt_0' placeholder='Last Name' oninput='applyWlFlt()' style='width:120px;'>"
+                           "<input type='text' id='flt_8' placeholder='Accession Number' oninput='applyWlFlt()' style='width:120px;'>"
+                           "<input type='text' id='flt_18' placeholder='Location' oninput='applyWlFlt()' style='width:100px;'>"
+                           "<input type='text' id='flt_17' placeholder='Station Name' oninput='applyWlFlt()' style='width:100px;'>"
+                           "<input type='text' id='flt_20' placeholder='Modality' oninput='applyWlFlt()' style='width:80px;'>"
+                           "<input type='text' id='flt_21' placeholder='Ref Phys' oninput='applyWlFlt()' style='width:100px;'>"
+                           "<input type='text' id='flt_6' placeholder='Proc Desc' oninput='applyWlFlt()' style='width:120px;'>"
+                           "<input type='text' id='flt_9' placeholder='Proc ID' oninput='applyWlFlt()' style='width:80px;'>"
+                           "<div style='display:flex; align-items:center; gap:5px;'><span style='color:#777; font-size:12px;'>Start Date:</span><input type='date' id='flt_12' oninput='applyWlFlt()'> <span style='color:#777; font-size:12px;'>End:</span><input type='date' id='flt_12e' oninput='applyWlFlt()'></div>"
+                           "<div style='display:flex; align-items:center; gap:5px;'><span style='color:#777; font-size:12px;'>Start Time:</span><input type='time' id='flt_13' oninput='applyWlFlt()'> <span style='color:#777; font-size:12px;'>End:</span><input type='time' id='flt_13e' oninput='applyWlFlt()'></div>"
+                           "</div>");
+
+            SendText(sock, "<script>"
+                           "function applyWlFlt() {"
+                           " var t=document.getElementById('pTable'); if(!t)return;"
+                           " var f0=document.getElementById('flt_0').value.toLowerCase();"
+                           " var f8=document.getElementById('flt_8').value.toLowerCase();"
+                           " var f18=document.getElementById('flt_18').value.toLowerCase();"
+                           " var f17=document.getElementById('flt_17').value.toLowerCase();"
+                           " var f20=document.getElementById('flt_20').value.toLowerCase();"
+                           " var f21=document.getElementById('flt_21').value.toLowerCase();"
+                           " var f6=document.getElementById('flt_6').value.toLowerCase();"
+                           " var f9=document.getElementById('flt_9').value.toLowerCase();"
+                           " var f12=document.getElementById('flt_12').value;"
+                           " var f12e=document.getElementById('flt_12e').value;"
+                           " var f13=document.getElementById('flt_13').value;"
+                           " var f13e=document.getElementById('flt_13e').value;"
+                           " for(var i=1;i<t.rows.length;i++){"
+                           "  var show=true; var c=t.rows[i].cells; if(!c)continue;"
+                           "  if(f0 && (c[0].innerText||'').toLowerCase().indexOf(f0)===-1) show=false;"
+                           "  if(f8 && (c[8].innerText||'').toLowerCase().indexOf(f8)===-1) show=false;"
+                           "  if(f18 && (c[18].innerText||'').toLowerCase().indexOf(f18)===-1) show=false;"
+                           "  if(f17 && (c[17].innerText||'').toLowerCase().indexOf(f17)===-1) show=false;"
+                           "  if(f20 && (c[20].innerText||'').toLowerCase().indexOf(f20)===-1) show=false;"
+                           "  if(f21 && (c[21].innerText||'').toLowerCase().indexOf(f21)===-1) show=false;"
+                           "  if(f6 && (c[6].innerText||'').toLowerCase().indexOf(f6)===-1) show=false;"
+                           "  if(f9 && (c[9].innerText||'').toLowerCase().indexOf(f9)===-1) show=false;"
+                           "  var dTxt=(c[12].innerText||'');"
+                           "  if(f12 && dTxt < f12) show=false;"
+                           "  if(f12e && dTxt > f12e) show=false;"
+                           "  var tTxt=(c[13].innerText||'');"
+                           "  if(f13 && tTxt < f13) show=false;"
+                           "  if(f13e && tTxt > f13e) show=false;"
+                           "  t.rows[i].style.display = show ? '' : 'none';"
+                           " }"
+                           "}"
+                           "function clearWlFlt() { "
+                           " document.getElementById('flt_0').value='';"
+                           " document.getElementById('flt_8').value='';"
+                           " document.getElementById('flt_18').value='';"
+                           " document.getElementById('flt_17').value='';"
+                           " document.getElementById('flt_20').value='';"
+                           " document.getElementById('flt_21').value='';"
+                           " document.getElementById('flt_6').value='';"
+                           " document.getElementById('flt_9').value='';"
+                           " document.getElementById('flt_12').value='';"
+                           " document.getElementById('flt_12e').value='';"
+                           " document.getElementById('flt_13').value='';"
+                           " document.getElementById('flt_13e').value='';"
+                           " applyWlFlt();"
+                           "}"
+                           "</script>");
+
             SendText(sock, "<script>function uplImg(fi, url){ if(!fi.files.length) return; var fd = new FormData(); fd.append('file', fi.files[0]); if(confirm('Would you like to write the currently selected Worklist patient data into this file\\'s header, erasing existing values?')){ fd.append('rewrite', '1'); fd.append('acc', document.getElementsByName('Accession')[0].value); fd.append('name', document.getElementsByName('PatientName')[0].value); fd.append('id', document.getElementsByName('PatientID')[0].value); fd.append('dob', document.getElementsByName('BirthDate')[0].value); fd.append('sex', document.getElementsByName('Sex')[0].value); } fetch(url, {method:'POST', body:fd}).then(function(){window.location.reload();}); }</script>");
 
             int isHeader = 1; 
@@ -2489,17 +2421,17 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                                 get_csv_field(cLine, 6, cFile, sizeof(cFile));
                                 get_csv_field(cLine, 7, cMod, sizeof(cMod));
                                 
-                                char linkBuf[1024];
+                                char linkBuf[2048];
                                 snprintf(linkBuf, sizeof(linkBuf), 
-                                    "<div style='margin-bottom:4px; font-size:12px; display:flex; align-items:center; gap:5px;'>"
+                                    "<div style='margin-bottom:8px; font-size:12px; display:block;'>"
                                     "<span>%s #%d:</span> "
-                                    "<a href='/view?sop=%s&acc=%s' target='_blank' style='color:#2196F3;text-decoration:none;font-weight:bold;'>%s</a> | "
-                                    "<a href='/download?sop=%s' style='color:#4CAF50;text-decoration:none;font-weight:bold;'>Download</a> | "
-                                    "<a href='/header?sop=%s' style='color:#9c27b0;text-decoration:none;font-weight:bold;'>Header</a> | "
-                                    "<label style='cursor:pointer; color:#f44336; font-weight:bold; text-decoration:none;'>Replace"
-                                    "<input type='file' accept='.dcm' style='display:none;' onchange=\"uplImg(this, '/replace?sop=%s')\">"
-                                    "</label> | "
-                                    "<a href='/delimage?sop=%s' onclick=\"return confirm('Delete image?');\" style='color:#f44336; font-weight:bold; text-decoration:none;'>Delete</a>"
+                                    "<a href='/view?sop=%s&acc=%s' target='_blank' onclick='event.stopPropagation();' style='color:#2196F3;text-decoration:none;font-weight:bold;'>%s</a> &nbsp;|&nbsp; "
+                                    "<a href='/download?sop=%s' onclick='event.stopPropagation();' style='color:#4CAF50;text-decoration:none;font-weight:bold;'>Download</a> &nbsp;|&nbsp; "
+                                    "<a href='/header?sop=%s' target='_blank' onclick='event.stopPropagation();' style='color:#9c27b0;text-decoration:none;font-weight:bold;'>Header</a> &nbsp;|&nbsp; "
+                                    "<label onclick='event.stopPropagation();' style='cursor:pointer; color:#f44336; font-weight:bold; text-decoration:none;'>Replace"
+                                    "<input type='file' accept='.dcm' style='display:none;' onclick='event.stopPropagation();' onchange=\"uplImg(this, '/replace?sop=%s')\">"
+                                    "</label> &nbsp;|&nbsp; "
+                                    "<a href='/delimage?sop=%s' onclick=\"event.stopPropagation(); return confirm('Delete image?');\" style='color:#f44336; font-weight:bold; text-decoration:none;'>Delete</a>"
                                     "</div>", 
                                     cMod[0] ? cMod : "OT", imgIdx++, cSop, acc, cFile, cSop, cSop, cSop, cSop);
                                 strncat(rowBuf, linkBuf, LINE_SIZE - strlen(rowBuf) - 1);
@@ -2515,8 +2447,8 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                     char uploadBtn[512];
                     snprintf(uploadBtn, sizeof(uploadBtn), 
                         "<div style='font-size:12px; margin-top:5px;'>"
-                        "<label style='cursor:pointer; color:#4CAF50; font-weight:bold; text-decoration:none;'>Upload"
-                        "<input type='file' accept='.dcm' style='display:none;' onchange=\"uplImg(this, '/upload_new?acc=%s')\">"
+                        "<label onclick='event.stopPropagation();' style='cursor:pointer; color:#4CAF50; font-weight:bold; text-decoration:none;'>Upload"
+                        "<input type='file' accept='.dcm' style='display:none;' onclick='event.stopPropagation();' onchange=\"uplImg(this, '/upload_new?acc=%s')\">"
                         "</label></div></td>", acc);
                     strncat(rowBuf, uploadBtn, LINE_SIZE - strlen(rowBuf) - 1);
                 }
@@ -2556,10 +2488,32 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
             char js[8192] = "<script>var rData = [";
             for (int i = 0; i < rCount; i++) { char tmp[1024]; snprintf(tmp, sizeof(tmp), "{id:'%s',loc:'%s',mod:'%s',ae:'%s',name:'%s',room:'%s'},", rId[i], rLoc[i], rMod[i], rAe[i], rName[i], rRoom[i]); strncat(js, tmp, sizeof(js) - strlen(js) - 1); }
             strncat(js, "]; function updR() { var idx = document.getElementsByName('StationName')[0].selectedIndex - 1; if(idx>=0) { var r=rData[idx]; document.getElementsByName('Location')[0].value=r.room; document.getElementsByName('Modality')[0].value=r.mod; document.getElementsByName('StationAE')[0].value=r.ae; document.getElementsByName('SPSID')[0].value=r.ae; document.getElementsByName('ProcDesc')[0].value=r.name; } }</script>", sizeof(js) - strlen(js) - 1);
-            SendText(sock, js); SendText(sock, "<select name='StationName' onchange='updR()'><option value=''>Station Name</option>");
+            SendText(sock, js); 
+            
+            SendText(sock, "<select name='StationName' onchange='updR()'><option value=''>Station Name</option>");
             for (int i = 0; i < rCount; i++) { char tmp[512]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rName[i], rName[i]); SendText(sock, tmp); }
-            SendText(sock, "</select> <input type='text' name='Location' placeholder='Location'> ");
-        } else { SendText(sock, "<input type='text' name='StationName' placeholder='Station Name'> <input type='text' name='Location' placeholder='Location'> "); }
+            SendText(sock, "</select> ");
+            
+            SendText(sock, "<select name='Location'><option value=''>Location</option>");
+            char uLocs[64][128]; int uLCount = 0;
+            for (int i = 0; i < rCount; i++) {
+                int found = 0;
+                for (int j = 0; j < uLCount; j++) { if (strcmp(uLocs[j], rRoom[i]) == 0) { found = 1; break; } }
+                if (!found && rRoom[i][0]) { strcpy(uLocs[uLCount++], rRoom[i]); char tmp[512]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rRoom[i], rRoom[i]); SendText(sock, tmp); }
+            }
+            SendText(sock, "</select> ");
+
+            SendText(sock, "<select name='Modality'><option value=''>Modality</option>");
+            char uMods[64][64]; int uMCount = 0;
+            for (int i = 0; i < rCount; i++) {
+                int found = 0;
+                for (int j = 0; j < uMCount; j++) { if (strcmp(uMods[j], rMod[i]) == 0) { found = 1; break; } }
+                if (!found && rMod[i][0]) { strcpy(uMods[uMCount++], rMod[i]); char tmp[512]; snprintf(tmp, sizeof(tmp), "<option value=\"%s\">%s</option>", rMod[i], rMod[i]); SendText(sock, tmp); }
+            }
+            SendText(sock, "</select> ");
+        } else { 
+            SendText(sock, "<input type='text' name='StationName' placeholder='Station Name'> <input type='text' name='Location' placeholder='Location'> <input type='text' name='Modality' placeholder='Modality'> "); 
+        }
         
         SendText(sock, szHtmlForms2); SendText(sock, szHtmlEnd); CloseHttpClient(clientIdx); return;
     }
@@ -2681,6 +2635,12 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                         fclose(fp);
                         RecordStoredImage(acc, "", "", tempSop, folder, filename, "OT", fileLen);
                         
+                        int offset = 0;
+                        if (fileLen > 132 && memcmp(fileData + 128, "DICM", 4) == 0) {
+                            offset = 132;
+                        }
+                        UpdateWorklistFromDicomTags(acc, (const uint8_t*)fileData + offset, fileLen - offset);
+                        
                         char rewrite[16] = {0};
                         ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "rewrite", rewrite, sizeof(rewrite));
                         if (rewrite[0] == '1') {
@@ -2781,6 +2741,12 @@ static void ProcessHttpClient(int clientIdx, char *pBuf) {
                         if (outFp) {
                             fwrite(fileData, 1, fileLen, outFp);
                             fclose(outFp);
+                            
+                            int offset = 0;
+                            if (fileLen > 132 && memcmp(fileData + 128, "DICM", 4) == 0) {
+                                offset = 132;
+                            }
+                            UpdateWorklistFromDicomTags(acc, (const uint8_t*)fileData + offset, fileLen - offset);
                             
                             char rewrite[16] = {0};
                             ExtractMultipartField(pBuf, g_clientBufLen[clientIdx], boundary, "rewrite", rewrite, sizeof(rewrite));
@@ -3291,12 +3257,8 @@ int main(int argc, char *argv[]) {
             TranslateMessage(&qmsg); DispatchMessage(&qmsg); 
         } else { Sleep(10); }
     }
-   ExportCSVsOnExit();
 
-   WSACleanup();
-   DeleteCriticalSection(&g_csvLock);
-   DeleteCriticalSection(&g_procCodesLock);
-   DeleteCriticalSection(&g_cstoreLock);
+    ExportCSVsOnExit();
 
     WSACleanup();
     DeleteCriticalSection(&g_csvLock);
@@ -3304,6 +3266,7 @@ int main(int argc, char *argv[]) {
     DeleteCriticalSection(&g_cstoreLock);
     
     if (g_findData) free(g_findData);
+
     if (patients_csv_data) { free(patients_csv_data); patients_csv_data = NULL; }
     
     for (int i = 0; i < MAX_CLIENTS; i++) {
