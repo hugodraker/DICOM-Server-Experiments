@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <title>RIS Staff Schedule & Room Delegation</title>
+    <script src="jspdf.umd.min.js"></script>
+    <style>
+        * { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; user-select: none; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #fff; touch-action: none; }
+        #mobile-header { display: flex; align-items: center; padding: 5px 10px; background: #2c3e50; color: #fff; height: 44px; width: 100%; gap: 10px; z-index: 60; position: relative; }
+        #btnMenu { padding: 4px 6px; border: 1px solid #4a627a; border-radius: 4px; background: #34495e; color: #fff; cursor: pointer; display: flex; align-items: center; }
+        #comboView { padding: 2px 4px; font-size: 13px; height: 26px; border: 1px solid #ccc; border-radius: 3px; background: #fff; cursor: pointer; }
+        #lblDateTitleMobile { font-size: 15px; font-weight: bold; flex: 1; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .back-link { color: #ecf0f1; text-decoration: none; font-size: 12px; padding: 4px 8px; background: #34495e; border-radius: 3px; }
+
+        #toolbar { display: flex; height: auto; min-height: 36px; background: #f1f3f4; border-bottom: 1px solid #dadce0; align-items: center; padding: 6px 10px; gap: 6px; flex-wrap: wrap; width: 100%; z-index: 55; position: relative; }
+        .toolbar-group { display: flex; gap: 4px; align-items: center; }
+        #toolbar button, #toolbar input, #toolbar select { min-height: 26px; font-size: 11px; padding: 4px 8px; }
+        #toolbar button { cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 3px; }
+        #toolbar button:hover { background: #e8eaed; }
+        #lblDateTitle { display: none; }
+
+        #canvas-container { height: calc(100vh - 84px); display: block; overflow-y: auto; overflow-x: hidden; position: relative; width: 100%; }
+        #header-row { position: sticky; top: 0; z-index: 50; height: 30px; background: #f8f9fa; border-bottom: 1px solid #dadce0; display: flex; padding-left: 65px; width: 100%; }
+        .col-header { flex: 1; text-align: center; font-size: 13px; font-weight: 600; color: #3c4043; line-height: 30px; border-right: 1px solid #dadce0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        #scroll-area { position: relative; display: flex; width: 100%; height: auto; overflow: visible; }
+        #timeline-labels { width: 65px; flex-shrink: 0; position: relative; background: #fff; border-right: 1px solid #dadce0; }
+        .time-label { position: absolute; right: 8px; font-size: 12px; color: #70757a; transform: translateY(-50%); }
+
+        #grid-bg { flex: 1; position: relative; }
+        #events-layer { position: absolute; top: 0; left: 65px; right: 0; bottom: 0; pointer-events: none; }
+
+        .event-card { position: absolute; border-radius: 4px; padding: 4px 8px; font-size: 12px; color: #fff; pointer-events: auto; cursor: grab; box-shadow: 0 1px 3px rgba(0,0,0,0.2); overflow: hidden; }
+        .event-card.selected { outline: 2px solid #000; z-index: 10; }
+        .event-title { font-weight: 600; margin-bottom: 2px; pointer-events: none; overflow-wrap: break-word; }
+        .event-time { font-size: 11px; opacity: 0.9; pointer-events: none; }
+        .resize-handle { position: absolute; bottom: 0; left: 0; right: 0; height: 10px; cursor: ns-resize; background: rgba(0,0,0,0.12); z-index: 5; }
+        .resize-handle:hover { background: rgba(0,0,0,0.3); }
+
+        .month-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-template-rows: repeat(6, minmax(0, 1fr)); height: 100%; width: 100%; min-height: 500px; }
+        .month-cell { border-right: 1px solid #dadce0; border-bottom: 1px solid #dadce0; padding: 4px; position: relative; }
+        .month-day-num { text-align: right; font-size: 12px; font-weight: 600; color: #3c4043; margin-bottom: 4px; }
+        .month-event { border-radius: 3px; font-size: 11px; padding: 2px 4px; margin-bottom: 2px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+
+        .upcoming-list { padding: 20px; overflow-y: auto; height: 100%; width: 100%; }
+        .upcoming-card { border: 1px solid #dadce0; border-radius: 8px; margin-bottom: 12px; padding: 12px; display: flex; background: #f8f9fa; }
+        .upcoming-color { width: 12px; border-radius: 4px; margin-right: 12px; }
+        .upcoming-details h3 { margin: 0 0 4px 0; font-size: 16px; color: #202124; }
+        .upcoming-details p { margin: 0; font-size: 13px; color: #5f6368; }
+
+        .modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #fff; padding: 20px; border: 1px solid #dadce0; border-radius: 8px; z-index: 100; box-shadow: 0 4px 16px rgba(0,0,0,0.2); width: 380px; max-width: 95vw; }
+        .modal h3 { margin-top: 0; color: #202124; }
+        .modal label { font-size: 12px; font-weight: 600; color: #5f6368; display: block; margin-top: 8px; }
+        .modal input[type="text"], .modal select { width: 100%; margin-top: 4px; padding: 6px; border: 1px solid #ccc; border-radius: 4px; user-select: text; }
+        .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+        .chk-list { max-height: 220px; overflow-y: auto; text-align: left; margin-bottom: 12px; border: 1px solid #ccc; padding: 8px; }
+        .chk-list div { margin-bottom: 6px; display: flex; align-items: center; }
+        .chk-list label { margin: 0 0 0 6px; cursor: pointer; display: inline; }
+    </style>
+</head>
+<body>
+    <div id="mobile-header">
+        <a href="index.html" class="back-link">&larr; RIS</a>
+        <button id="btnMenu" title="Toggle Toolbar">&#9776;</button>
+        <select id="comboView">
+            <option value="1">1 Day View</option>
+            <option value="2">4 Day View</option>
+            <option value="3" selected>Week View</option>
+            <option value="4">Staff Columns View</option>
+            <option value="6">Month View</option>
+            <option value="7">Upcoming</option>
+            <option value="8">Schedule Table</option>
+        </select>
+        <div id="lblDateTitleMobile"></div>
+    </div>
+
+    <div id="toolbar" data-open="true">
+        <div class="toolbar-group">
+            <input type="checkbox" id="chkEditMode" checked style="margin:0 4px 0 0;">
+            <label for="chkEditMode" style="font-size:11px; font-weight:600; cursor:pointer;">Edit</label>
+        </div>
+        <div class="toolbar-group">
+            <button id="btnZoomIn">+</button>
+            <button id="btnZoomOut">-</button>
+        </div>
+        <div class="toolbar-group">
+            <button id="btnPrev">&lt; Prev</button>
+            <button id="btnPrevDay">&lt;</button>
+            <button id="btnNextDay">&gt;</button>
+            <button id="btnNext">Next &gt;</button>
+        </div>
+        <div id="lblDateTitle"></div>
+
+        <div class="toolbar-group">
+            <select id="comboDefaultEvent" title="Default Shift Type">
+                <option value="WORKING_REGULAR">WORKING_REGULAR</option>
+                <option value="ON_CALL_PRIMARY">ON_CALL_PRIMARY</option>
+                <option value="ON_CALL_BACKUP">ON_CALL_BACKUP</option>
+                <option value="OFF_SICK">OFF_SICK</option>
+                <option value="OFF_VACATION">OFF_VACATION</option>
+                <option value="OFF_CME_TRAINING">OFF_CME_TRAINING</option>
+            </select>
+            <select id="comboDefaultFacility" title="Default Facility"></select>
+            <select id="comboDefaultRoom" title="Default Modality Room"><option value="">-- No Room --</option></select>
+        </div>
+
+        <button id="btnScheduling" style="background:#039BE5; color:#fff; border:none; font-weight:600;">Auto-Schedule</button>
+        <button id="btnFilterPeople">Filter Staff</button>
+        <select id="comboTempPersonFilter"><option value="">All Visible</option></select>
+        <button id="btnCloneForUsers">Clone</button>
+        <button id="btnCopy">Copy</button>
+        <button id="btnDelete" style="color:#d93025;">Delete</button>
+        <button id="btnPrint">PDF</button>
+        <button id="btnExport">TXT</button>
+    </div>
+
+    <div id="canvas-container">
+        <div id="header-row"></div>
+        <div id="scroll-area">
+            <div id="timeline-labels"></div>
+            <div id="grid-bg"></div>
+            <div id="events-layer"></div>
+        </div>
+    </div>
+
+    <!-- Filter Staff Modal -->
+    <div id="peopleFilterModal" class="modal">
+        <h3>Select Visible Staff</h3>
+        <div id="peopleFilterList" class="chk-list"></div>
+        <div class="modal-buttons">
+            <button onclick="document.getElementById('peopleFilterModal').style.display='none'">Close</button>
+            <button id="btnSavePeopleFilter" style="background:#039BE5; color:#fff; border:none; padding:6px 12px; border-radius:3px;">Save Filter</button>
+        </div>
+    </div>
+
+    <!-- Clone Shift Modal -->
+    <div id="cloneUsersModal" class="modal">
+        <h3>Clone Selected Shift to Staff</h3>
+        <div id="cloneUsersList" class="chk-list"></div>
+        <div class="modal-buttons">
+            <button onclick="document.getElementById('cloneUsersModal').style.display='none'">Cancel</button>
+            <button id="btnDoCloneUsers" style="background:#039BE5; color:#fff; border:none; padding:6px 12px; border-radius:3px;">Clone</button>
+        </div>
+    </div>
+
+    <!-- Edit Single Shift / Room Delegation Modal (Double-click card) -->
+    <div id="shiftEditModal" class="modal">
+        <h3>Edit Shift & Room Delegation</h3>
+        <input type="hidden" id="editShiftId">
+        <label>Staff Member</label><select id="editShiftUser"></select>
+        <label>Facility</label><select id="editShiftFacility"></select>
+        <label>Assigned Modality Room</label><select id="editShiftRoom"><option value="">-- No Room --</option></select>
+        <label>Shift Type</label>
+        <select id="editShiftType">
+            <option value="WORKING_REGULAR">WORKING_REGULAR</option>
+            <option value="ON_CALL_PRIMARY">ON_CALL_PRIMARY</option>
+            <option value="ON_CALL_BACKUP">ON_CALL_BACKUP</option>
+            <option value="OFF_SICK">OFF_SICK</option>
+            <option value="OFF_VACATION">OFF_VACATION</option>
+            <option value="OFF_CME_TRAINING">OFF_CME_TRAINING</option>
+        </select>
+        <label>Notes</label><input type="text" id="editShiftNotes" placeholder="e.g., Primary CT operator">
+        <div class="modal-buttons">
+            <button id="btnCancelShiftEdit">Cancel</button>
+            <button id="btnSaveShiftEdit" style="background:#2ecc71; color:#fff; border:none; padding:6px 12px; border-radius:3px;">Save</button>
+        </div>
+    </div>
+
+    <!-- Automated Weekly Scheduling Datalists -->
+    <datalist id="dl-weekly"><option value="Clear"><option value="37.5"><option value="40"><option value="44"></datalist>
+    <datalist id="dl-daily"><option value="Clear"><option value="8"><option value="7.5"><option value="10"><option value="12"></datalist>
+    <datalist id="dl-rest"><option value="Clear"><option value="0"><option value="0.5"><option value="1"></datalist>
+    <datalist id="dl-coverage"><option value="Clear"><option value="8-4:30, 9-5, 10-6:30"><option value="8-7, 9-5"><option value="8-4:30"><option value="9-5"></datalist>
+    <datalist id="dl-pref"><option value="Default"><option value="Clear"><option value="8-4:30"><option value="9-5"><option value="10-6:30"></datalist>
+    <datalist id="dl-days"><option value="Clear"><option value="2,3,4,5,6"><option value="2,3,4,5,6,7"><option value="1,2,3,4,5,6,7"></datalist>
+
+    <!-- Automated Weekly Scheduling Modal -->
+    <div id="schedulingModal" class="modal" style="width: 880px; max-width: 96vw; height: 80vh; display: none; flex-direction: column; z-index: 110;">
+        <h3 style="flex-shrink:0; margin-bottom:10px;">Automated Weekly Staff Scheduling</h3>
+        <div style="display:flex; gap:10px; margin-bottom:10px; align-items:center; flex-shrink:0;">
+            <button id="btnPrevWeek" style="padding:4px 8px;">&lt;&lt;</button>
+            <select id="schedWeekSelect" style="flex:1; padding:4px; font-size:14px;"></select>
+            <button id="btnNextWeek" style="padding:4px 8px;">&gt;&gt;</button>
+        </div>
+        <div style="display:flex; gap:10px; margin-bottom:10px; align-items:center; flex-shrink:0;">
+            <input type="text" id="schedUserFilter" placeholder="Filter staff..." style="flex:1; padding:6px;">
+            <button id="btnSchedSelectAll" style="padding:4px 8px;">Select All</button>
+            <button id="btnSchedSelectNone" style="padding:4px 8px;">Unselect All</button>
+        </div>
+        <div style="overflow-x:auto; flex:1; display:flex; flex-direction:column;">
+            <div style="min-width:800px; display:flex; flex-direction:column; height:100%;">
+                <div id="schedHeaderRow" style="display:flex; gap:10px; padding:0 10px 4px; font-weight:bold; font-size:12px; cursor:pointer;"></div>
+                <div id="schedUserList" style="flex:1; overflow-y:auto; border:1px solid #dadce0; padding:10px; margin-bottom:10px; background:#fff;"></div>
+            </div>
+        </div>
+        <div class="modal-buttons" style="flex-shrink:0; justify-content:space-between; align-items:flex-start;">
+            <details style="margin-right:auto;">
+                <summary style="font-size:12px; font-weight:bold; color:#5f6368; cursor:pointer; margin-bottom:5px;">Global Fallback Settings</summary>
+                <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; background:#f8f9fa; padding:8px; border-radius:4px; border:1px solid #dadce0;">
+                    <span style="font-size:11px;">Cov:</span><input type="text" id="globalSchedCoverage" data-type="coverage" data-default="9-5" list="dl-coverage" style="width:110px;">
+                    <span style="font-size:11px;">Pref:</span><input type="text" id="globalSchedPref" data-type="pref" data-default="Default" list="dl-pref" style="width:110px;">
+                    <span style="font-size:11px;">Days:</span><input type="text" id="globalSchedDays" data-type="days" data-default="2,3,4,5,6" list="dl-days" style="width:80px;">
+                    <span style="font-size:11px;">Rest:</span><input type="text" id="globalSchedRest" data-type="rest" data-default="0.5" list="dl-rest" style="width:60px;">
+                    <span style="font-size:11px;">Daily:</span><input type="text" id="globalSchedDaily" data-type="daily" data-default="8" list="dl-daily" style="width:60px;">
+                    <span style="font-size:11px;">Weekly:</span><input type="text" id="globalSchedWeekly" data-type="weekly" data-default="40" list="dl-weekly" style="width:60px;">
+                </div>
+            </details>
+            <div style="display:flex; gap:8px;">
+                <button id="btnSchedClearWeek" style="background:#E53935; color:#fff; border:none; padding:8px 14px; border-radius:3px; cursor:pointer;">Clear Week</button>
+                <button id="btnMakeSchedule" style="background:#039BE5; color:#fff; border:none; padding:8px 16px; border-radius:3px; cursor:pointer;">Make Schedule</button>
+                <button onclick="document.getElementById('schedulingModal').style.display='none'" style="padding:8px 12px;">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="calendar_engine.js"></script>
+    <script src="staff_schedule.js"></script>
+</body>
+</html>
