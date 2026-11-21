@@ -60,6 +60,9 @@ function buildRsnaAdminHeader() {
 }
 
 async function createNewUserAccount() {
+    const me = await ensureCurrentUser();
+    if (me.role !== 'SYSTEM_ADMIN') return setUserAdminMsg('Only SYSTEM_ADMIN can create user accounts.', true);
+
     const uname = (document.getElementById('nu-uname')?.value || '').trim();
     const fname = (document.getElementById('nu-fname')?.value || '').trim();
     const lname = (document.getElementById('nu-lname')?.value || '').trim();
@@ -67,27 +70,37 @@ async function createNewUserAccount() {
     const role  = document.getElementById('nu-role')?.value;
     const email = (document.getElementById('nu-email')?.value || '').trim();
     const fax   = (document.getElementById('nu-fax')?.value   || '').trim();
-    const ch    = document.getElementById('nu-ch')?.value || 'HL7_ORU_R01';
+    const ch    = document.getElementById('nu-ch')?.value || 'PORTAL';
     const pass  = document.getElementById('nu-pass')?.value || '';
 
     if (!uname || !fname || !lname || !email || pass.length < 6) {
         return setUserAdminMsg('Username, First/Last Name, Email, and Password (min 6 chars) are required.', true);
     }
 
+    const facRow = await execSQL(`SELECT facility_id FROM facilities ORDER BY facility_id ASC LIMIT 1`);
+    const facId = (Array.isArray(facRow) && facRow[0]?.facility_id) ? facRow[0].facility_id : 'NULL';
+
     const ins = await execSQL(`
-        INSERT INTO staff_users (username, role_id, first_name, last_name, credentials, email, fax_number, preferred_comm_channel, is_active)
-        VALUES (${sqlStr(uname)}, ${role}, ${sqlStr(fname)}, ${sqlStr(lname)}, ${sqlStr(cred, true)}, ${sqlStr(email)}, ${sqlStr(fax, true)}, ${sqlStr(ch)}, 1)
+        INSERT INTO staff_users (
+            username, password_hash, role_id, primary_facility_id,
+            first_name, last_name, credentials, email, fax_number, preferred_comm_channel, is_active
+        ) VALUES (
+            ${sqlStr(uname)}, 'PENDING', ${role}, ${facId},
+            ${sqlStr(fname)}, ${sqlStr(lname)}, ${sqlStr(cred, true)}, ${sqlStr(email)}, ${sqlStr(fax, true)}, ${sqlStr(ch)}, 1
+        )
     `);
     if (ins && ins.error) return setUserAdminMsg(ins.error, true);
 
     const row = await execSQL(`SELECT user_id FROM staff_users WHERE username = ${sqlStr(uname)} LIMIT 1`);
     const uid = row?.[0]?.user_id;
     if (uid) {
-        await fetch('/api/admin_set_password', {
+        const pwRes = await fetch('/api/admin_set_password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({ user_id: String(uid), password: pass }).toString()
         });
+        const pwData = await pwRes.json();
+        if (pwData.error) return setUserAdminMsg(`User created, but password failed: ${pwData.error}`, true);
     }
     await loadUserAccountsAdmin();
     setUserAdminMsg(`Account "${uname}" created with password.`);
@@ -97,6 +110,18 @@ async function deleteDBRow(tableName, pkCol, pkVal) {
     const res = await execSQL(`DELETE FROM "${tableName}" WHERE "${pkCol}" = '${pkVal}'`);
     if (res && res.error) setDBStatus(`Delete Error: ${res.error}`, true);
     else browseDBTable();
+}
+
+async function ensureCurrentUser() {
+    if (!window.g_currentUser || !window.g_currentUser.user_id) {
+        try {
+            const res = await fetch('/api/me');
+            window.g_currentUser = await res.json();
+        } catch (e) {
+            window.g_currentUser = { authenticated: false };
+        }
+    }
+    return window.g_currentUser;
 }
 
 function exportCurrentDBTable() {
@@ -254,6 +279,32 @@ function insertToken(inputId, token) {
 }
 
 async function loadUserAccountsAdmin() {
+    const me = await ensureCurrentUser();
+    const isAdmin = (me.role === 'SYSTEM_ADMIN');
+
+    const myPwCard = `
+    <div style="background:#fff; padding:14px; border-radius:4px; box-shadow:0 1px 3px rgba(0,0,0,0.1); margin-bottom:12px; font-size:12px; max-width:680px;">
+        <b style="color:#2c3e50;">Change My Password (${escAttr(me.user || 'current user')} &bull; ${escAttr(me.role || '')})</b>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px; margin-top:8px;">
+            <div><label style="font-weight:bold;">Current Password *</label><input type="password" id="my-cur-pw" placeholder="Current password"></div>
+            <div><label style="font-weight:bold;">New Password *</label><input type="password" id="my-new-pw" placeholder="Min 6 chars"></div>
+            <div><label style="font-weight:bold;">Confirm New Password *</label><input type="password" id="my-cnf-pw" placeholder="Repeat new password"></div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:10px; align-items:center;">
+            <button class="btn" style="background:#2980b9; margin:0;" onclick="submitChangeMyPassword()">Update My Password</button>
+            ${me.email ? `<button class="btn" style="background:#8e44ad; margin:0;" onclick="adminSendPasswordReset('${escAttr(me.email)}')">Send Email Reset Token</button>` : ''}
+        </div>
+    </div>`;
+
+    if (!isAdmin) {
+        document.getElementById('main-content').innerHTML = `
+        ${renderAdminToolsBar('USERS')}
+        <div class="header-flex"><h2>My Account &amp; Password</h2></div>
+        <div id="usr-status-bar" style="display:none; margin:10px 0; padding:8px 12px; border-radius:4px; font-size:13px; font-weight:bold;"></div>
+        ${myPwCard}`;
+        return;
+    }
+
     const [users, roles] = await Promise.all([
         execSQL(`
             SELECT u.user_id, u.username, u.first_name, u.last_name,
@@ -262,7 +313,7 @@ async function loadUserAccountsAdmin() {
                    COALESCE(u.email, '') AS email,
                    COALESCE(u.work_phone, '') AS work_phone,
                    COALESCE(u.fax_number, '') AS fax_number,
-                   COALESCE(u.preferred_comm_channel, 'HL7_ORU_R01') AS preferred_comm_channel,
+                   COALESCE(u.preferred_comm_channel, 'PORTAL') AS preferred_comm_channel,
                    u.role_id, u.is_active,
                    r.role_code,
                    CASE WHEN c.user_id IS NOT NULL THEN 1 ELSE 0 END AS has_password,
@@ -277,12 +328,12 @@ async function loadUserAccountsAdmin() {
 
     const roleList = Array.isArray(roles) ? roles : [];
     const roleOpts = roleList.map(r => `<option value="${r.role_id}">${escAttr(r.role_code)}</option>`).join('');
-    const chOpts = ['HL7_ORU_R01','FAX','EMAIL','SMS','PATIENT_PORTAL'].map(c => `<option value="${c}">${c}</option>`).join('');
+    const chOpts = ['PORTAL','EMAIL','FAX','SMS','HL7_EHR'].map(c => `<option value="${c}">${c}</option>`).join('');
 
     const rowsHtml = (Array.isArray(users) && users.length) ? users.map(u => `
         <tr style="${u.is_active ? '' : 'opacity:0.55;'}">
             <td style="padding:6px; border-bottom:1px solid #ecf0f1; font-size:12px;">
-                <b>${escAttr(u.username)}</b>
+                <b>${escAttr(u.username)}</b>${String(u.user_id) === String(me.user_id) ? ' <span style="color:#2980b9; font-size:10px;">(You)</span>' : ''}
                 <div style="font-size:10px; color:#7f8c8d;">ID #${u.user_id}</div>
             </td>
             <td style="padding:6px; border-bottom:1px solid #ecf0f1; font-size:12px;">
@@ -313,6 +364,7 @@ async function loadUserAccountsAdmin() {
     <div class="header-flex"><h2>User Accounts &amp; Password Management</h2></div>
     <div id="usr-status-bar" style="display:none; margin:10px 0; padding:8px 12px; border-radius:4px; font-size:13px; font-weight:bold;"></div>
     <div id="usr-pw-bar"></div>
+    ${myPwCard}
 
     <div style="background:#fff; padding:14px; border-radius:4px; box-shadow:0 1px 3px rgba(0,0,0,0.1); margin-bottom:12px; font-size:12px;">
         <b style="color:#2c3e50;">Create New User Account (staff_users)</b>
@@ -346,19 +398,11 @@ async function loadUserAccountsAdmin() {
 }
 
 async function loadAdminDbEditor() {
-    if (typeof loadDbEditor === 'function') {
-        await loadDbEditor();
-        const mc = document.getElementById('main-content');
-        if (mc && !mc.querySelector('.admin-tools-bar-injected')) {
-            const bar = document.createElement('div');
-            bar.className = 'admin-tools-bar-injected';
-            bar.innerHTML = renderAdminToolsBar('DB');
-            mc.prepend(bar);
-        }
-    }
+    return loadDBEditor();
 }
 
 async function loadTypstTemplateEditor(selectedId = null) {
+    await ensureCurrentUser();
     const rows = await execSQL(`SELECT * FROM typst_report_templates ORDER BY is_default DESC, modality_type, template_code`);
     const list = Array.isArray(rows) ? rows : [];
     const active = selectedId === 'NEW' ? null : (list.find(r => String(r.typst_template_id) === String(selectedId)) || list[0] || null);
@@ -374,10 +418,10 @@ async function loadTypstTemplateEditor(selectedId = null) {
     const mods = ['ALL','CT','MRI','XRAY','US','MAMMO','FLUORO','NM','PET','DEXA'];
 
     document.getElementById('main-content').innerHTML = `
+    ${renderAdminToolsBar('TYPST')}
     <div class="header-flex">
         <h2>SQL Typst Report Templates</h2>
         <div style="display:flex; gap:8px;">
-<button class="btn" style="background:#8e44ad;" onclick="loadTypstTemplateEditor()">Typst Report Templates</button>
             <select style="width:auto; min-width:260px;" onchange="loadTypstTemplateEditor(this.value)">${opts}</select>
             <button class="btn" style="background:#8e44ad; margin:0;" onclick="previewAdminTypstTemplate()">Live Preview</button>
             <button class="btn" style="background:#27ae60; margin:0;" onclick="saveAdminTypstTemplate(${active ? active.typst_template_id : 'null'})">Save to SQL</button>
@@ -408,6 +452,9 @@ async function loadTypstTemplateEditor(selectedId = null) {
 
 /* --- SQLITE DATABASE & TABLE EDITOR --- */
 async function loadDBEditor(selectedTable = '') {
+    const me = await ensureCurrentUser();
+    if (me.role !== 'SYSTEM_ADMIN') return loadUserAccountsAdmin();
+
     const tablesRes = await execSQL(`
         SELECT name, type
         FROM sqlite_master
@@ -424,6 +471,7 @@ async function loadDBEditor(selectedTable = '') {
     ).join('');
 
     document.getElementById('main-content').innerHTML = `
+    ${renderAdminToolsBar('DB')}
     <div class='header-flex'>
         <h2>SQLite Database Editor (ris.db)</h2>
         <div style="display:flex; gap:8px; align-items:center;">
@@ -465,7 +513,6 @@ async function loadDBEditor(selectedTable = '') {
     if (activeTable) browseDBTable();
     else document.getElementById('db-grid-wrap').innerHTML = '<p>No tables found in database.</p>';
 }
-
 async function loadReminderGatewaysUI() {
     const rows = await execSQL(`SELECT setting_key, setting_value FROM app_settings WHERE setting_key LIKE 'rem_%' OR setting_key LIKE 'rep_%'`);
     const cfg = {};
@@ -696,16 +743,17 @@ function parseCommaCsvLine(str) {
 }
 
 function renderAdminToolsBar(activeTab = 'SETTINGS') {
+    const isAdmin = (window.g_currentUser?.role === 'SYSTEM_ADMIN');
     const tabBtn = (id, lbl, fn) => {
         const active = activeTab === id;
         return `<button class="btn" style="margin:0; background:${active ? '#2c3e50' : '#7f8c8d'}; font-weight:${active ? 'bold' : 'normal'};" onclick="${fn}">${lbl}</button>`;
     };
     return `
     <div style="display:flex; flex-wrap:wrap; gap:8px; background:#fff; padding:10px 12px; border-radius:4px; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:12px;">
-        ${tabBtn('SETTINGS', 'System Settings', 'loadAdminSettings()')}
-        ${tabBtn('USERS',    'User Accounts',   'loadUserAccountsAdmin()')}
+        ${tabBtn('SETTINGS', 'System Settings', 'loadAdmin()')}
+        ${tabBtn('USERS',    isAdmin ? 'User Accounts' : 'My Password', 'loadUserAccountsAdmin()')}
         ${tabBtn('TYPST',    'Typst Templates', 'loadTypstTemplateEditor()')}
-        ${tabBtn('DB',       'Database Editor', 'loadAdminDbEditor()')}
+        ${isAdmin ? tabBtn('DB', 'Database Editor', 'loadDBEditor()') : ''}
     </div>`;
 }
 
@@ -752,6 +800,29 @@ function renderRsnaTemplateForm(d) {
         <button class="btn" onclick="submitRsnaTemplate(${isEdit ? d.template_row_id : 'null'})">${isEdit ? 'Update Template' : 'Save Template'}</button>
         <div id="rsna-err" style="color:#e74c3c; font-weight:bold; margin-top:8px;"></div>
     </div>`;
+}
+
+async function submitChangeMyPassword() {
+    const cur = document.getElementById('my-cur-pw')?.value || '';
+    const nw  = document.getElementById('my-new-pw')?.value || '';
+    const cnf = document.getElementById('my-cnf-pw')?.value || '';
+
+    if (nw.length < 6) return setUserAdminMsg('New password must be at least 6 characters.', true);
+    if (nw !== cnf) return setUserAdminMsg('New password and confirmation do not match.', true);
+
+    const res = await fetch('/api/change_my_password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ current_password: cur, new_password: nw }).toString()
+    });
+    const data = await res.json();
+    if (data.error) return setUserAdminMsg(data.error, true);
+
+    ['my-cur-pw', 'my-new-pw', 'my-cnf-pw'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+    setUserAdminMsg('Your password has been updated.');
 }
 
 async function submitAdminSetPassword(userId) {
@@ -932,6 +1003,11 @@ async function submitShift() {
 }
 
 async function toggleUserAccountActive(userId, nextActive) {
+    const me = await ensureCurrentUser();
+    if (me.role !== 'SYSTEM_ADMIN') return setUserAdminMsg('Only SYSTEM_ADMIN can modify accounts.', true);
+    if (String(userId) === String(me.user_id) && nextActive === 0) {
+        return setUserAdminMsg('You cannot disable your own currently active admin account.', true);
+    }
     await execSQL(`UPDATE staff_users SET is_active = ${nextActive} WHERE user_id = ${userId}`);
     await loadUserAccountsAdmin();
     setUserAdminMsg(`User #${userId} ${nextActive ? 'enabled' : 'disabled'}.`);
@@ -1024,9 +1100,10 @@ function buildAdminHeader(title, table, createFunc) {
     `;
 }
 
-/* --- MAIN DASHBOARD --- */
 async function loadAdmin() {
-    let html = `<div class='header-flex'><h2>Administration & Master Files</h2></div>
+    await ensureCurrentUser();
+    let html = `${renderAdminToolsBar('SETTINGS')}
+                <div class='header-flex'><h2>Administration &amp; Master Files</h2></div>
                 <p style="color: #777;">Manage reminder gateways, slots, referring physicians, exams, RSNA reporting templates, facilities, equipment, and clinical indications.</p>`;
 
     html += `<div id="admin-reminder-gateways" style="margin-bottom: 30px;">Loading Reminder Gateways...</div>`;
@@ -1070,6 +1147,7 @@ async function loadAdmin() {
     const icd = await execSQL(`SELECT icd10_code, short_description, full_description FROM icd10_diagnoses ORDER BY icd10_code`);
     document.getElementById('admin-icd10_diagnoses').innerHTML = buildTable(icd, 'icd10_diagnoses', 'icd10_code', 'editIcd10UI');
 }
+
 /* --- ADMIN APPOINTMENT SLOT AVAILABILITY --- */
 async function newAdminSlotUI() {
     let html = `

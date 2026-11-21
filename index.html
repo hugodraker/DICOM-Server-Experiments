@@ -50,7 +50,54 @@
         .cal-modal .chk-list div { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
     </style>
 <script>
+function openChangeMyPasswordModal() {
+    document.getElementById('ris-pw-modal')?.remove();
+    const ov = document.createElement('div');
+    ov.id = 'ris-pw-modal';
+    ov.style.cssText = 'position:fixed; inset:0; z-index:9999; background:rgba(44,62,80,0.75); display:flex; align-items:center; justify-content:center; font-family:sans-serif;';
+    ov.innerHTML = `
+    <div style="background:#fff; width:360px; max-width:92vw; padding:20px; border-radius:6px; box-shadow:0 10px 30px rgba(0,0,0,0.4);">
+        <h3 style="margin:0 0 12px 0; color:#2c3e50;">Change My Password</h3>
+        <div id="mpw-msg" style="display:none; margin-bottom:10px; padding:8px; border-radius:4px; font-size:12px; font-weight:bold;"></div>
+        <label style="font-size:12px; font-weight:bold;">Current Password *</label>
+        <input type="password" id="mpw-cur" style="margin-bottom:10px;">
+        <label style="font-size:12px; font-weight:bold;">New Password (min 6 chars) *</label>
+        <input type="password" id="mpw-new" style="margin-bottom:10px;">
+        <label style="font-size:12px; font-weight:bold;">Confirm New Password *</label>
+        <input type="password" id="mpw-cnf" style="margin-bottom:12px;" onkeydown="if(event.key==='Enter')submitMyPasswordModal()">
+        <div style="display:flex; gap:8px;">
+            <button class="btn" style="flex:1; background:#27ae60; margin:0;" onclick="submitMyPasswordModal()">Update</button>
+            <button class="btn" style="flex:1; background:#7f8c8d; margin:0;" onclick="document.getElementById('ris-pw-modal')?.remove()">Close</button>
+        </div>
+    </div>`;
+    document.body.appendChild(ov);
+}
 
+async function submitMyPasswordModal() {
+    const cur = document.getElementById('mpw-cur')?.value || '';
+    const nw  = document.getElementById('mpw-new')?.value || '';
+    const cnf = document.getElementById('mpw-cnf')?.value || '';
+    const msg = document.getElementById('mpw-msg');
+    const show = (t, err) => {
+        if (!msg) return;
+        msg.style.display = 'block';
+        msg.style.background = err ? '#fdedec' : '#eafaf1';
+        msg.style.color = err ? '#922b21' : '#1e8449';
+        msg.innerText = t;
+    };
+    if (nw.length < 6) return show('New password must be at least 6 characters.', true);
+    if (nw !== cnf) return show('Passwords do not match.', true);
+
+    const res = await fetch('/api/change_my_password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ current_password: cur, new_password: nw }).toString()
+    });
+    const data = await res.json();
+    if (data.error) return show(data.error, true);
+    show('Password updated successfully.', false);
+    setTimeout(() => document.getElementById('ris-pw-modal')?.remove(), 900);
+}
 async function checkAuthSession() {
     const res = await fetch('/api/me');
     const me = await res.json();
@@ -192,10 +239,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         <a href="staff_schedule.html">Staff Schedule</a>
         <a onclick="loadAdmin()">Administration</a>
         <a onclick="loadBillingModule()">Billing &amp; RCM</a>
-        <a onclick="loadDBEditor()">Database Editor</a>
         <a onclick="loadPhysicianQueue()">Physician Queue</a>
         <a onclick="loadCommQueue()">Comm Queue</a>
-<span id="nav-user-badge" style="margin-left:auto; color:#ecf0f1; font-size:12px; font-weight:bold; align-self:center; padding-right:8px;"></span>
+ <span id="nav-user-badge" style="margin-left:auto; color:#ecf0f1; font-size:12px; font-weight:bold; align-self:center; padding-right:8px;"></span>
+<button class="btn" style="background:#34495e; margin:0 6px 0 0; padding:5px 10px; font-size:12px;" onclick="openChangeMyPasswordModal()">My Password</button>
 <button class="btn" style="background:#c0392b; margin:0; padding:5px 10px; font-size:12px;" onclick="logoutUser()">Logout</button>
     </div>
     <div class="content" id="main-content">

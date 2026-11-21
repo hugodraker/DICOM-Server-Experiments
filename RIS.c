@@ -3176,6 +3176,14 @@ else if (strncmp(pBuf, "GET /api/me", 11) == 0) {
     else if (strncmp(pBuf, "POST /api/logout", 16) == 0) {
         HandleApiLogout(sock, pBuf);
     }
+else if (strncmp(pBuf, "POST /api/admin_set_password", 28) == 0) {
+        char *body = strstr(pBuf, "\r\n\r\n");
+        if (body) { body += 4; HandleApiAdminSetPassword(sock, pBuf, body); }
+    }
+    else if (strncmp(pBuf, "POST /api/change_my_password", 28) == 0) {
+        char *body = strstr(pBuf, "\r\n\r\n");
+        if (body) { body += 4; HandleApiChangeMyPassword(sock, pBuf, body); }
+    }
     else if (strncmp(pBuf, "POST /api/admin_set_password", 28) == 0) {
         char *body = strstr(pBuf, "\r\n\r\n");
         if (body) { body += 4; HandleApiAdminSetPassword(sock, body); }
